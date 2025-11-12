@@ -120,7 +120,7 @@ class ParabolicWaveEquationSolver:
         
         return A, B
     
-    def solve(self, u0_func, z_s):
+    def solve(self, u0_func, z_s, progress_callback = None):
         """
         Solve the parabolic equation with optimized range marching.
         
@@ -163,9 +163,6 @@ class ParabolicWaveEquationSolver:
         # Pre-compute constants
         k_0_sq_h_sq = self.k_0**2 * self.h**2
 
-        # Range marching loop
-        pbar = tqdm(total=len(self.r_mesh) - 1, position=0, leave=True)
-                
         for nn in range(len(self.r_mesh) - 1):
 
             # From Eq. 6.189 (Jensen, Computational Ocean Acoustics)
@@ -176,9 +173,8 @@ class ParabolicWaveEquationSolver:
             self.u[nn+1, 0] = 0 # pressure release
             self.u[nn+1, -1] = 0 # absorbing layer
             
-            pbar.update(1)
-        
-        pbar.close()
+            if progress_callback is not None:
+                progress_callback(nn, len(self.r_mesh) - 1)
         
         return self.u
 

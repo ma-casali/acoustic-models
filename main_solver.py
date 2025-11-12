@@ -27,7 +27,7 @@ def u0_gaussian_generalized(z, z_s, k_0):
         -1 * k_0**2 / 2 * (z - z_s)**2 * np.tan(theta_half_bw)**2
     ) * np.exp(-1j * k_0 * (z - z_s) * np.sin(theta_tilt))
 
-def run_solver_from_gui(input_dict, fig, ax):
+def run_solver_from_gui(input_dict, fig, ax, progress_callback = None):
     """
     Main function to create and run the solver.
     """
@@ -65,7 +65,7 @@ def run_solver_from_gui(input_dict, fig, ax):
     
     # Solve the parabolic wave equation
     print("\nSolving parabolic wave equation...")
-    u = solver.solve(u0_gaussian_generalized, z_s=int(input_dict['z_s']))
+    u = solver.solve(u0_gaussian_generalized, z_s=int(input_dict['z_s']), progress_callback = progress_callback)
     
     # Plot the results
     print("\nPlotting results...")
