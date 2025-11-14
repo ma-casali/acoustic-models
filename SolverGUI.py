@@ -24,6 +24,10 @@ class MainWindow(QWidget):
         self.init_ui()
     
     def init_ui(self):
+
+        # set initial UI parameters
+        self.cbar = None
+
         """
         Initialize the user interface.
         """
@@ -118,25 +122,6 @@ class MainWindow(QWidget):
         # =============================
         self.depth_parameters = QHBoxLayout()
 
-        # Source depth
-        self.source_depth_layout = QHBoxLayout()
-
-        self.source_depth_slider = QSlider(Qt.Orientation.Vertical)
-        self.source_depth_slider.setInvertedAppearance(True)
-        self.source_depth_slider.setFixedHeight(100)
-        self.source_depth_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.source_depth_slider.setMinimum(0)
-        self.source_depth_slider.setMaximum(2000)
-        self.source_depth_slider.setValue(1500)
-        self.source_depth_slider.setTickInterval(100)
-        self.source_depth_slider.setTickPosition(QSlider.TickPosition.NoTicks)
-        self.source_depth_slider.valueChanged.connect(self.enforce_slider_max)
-        self.source_depth_layout.addWidget(self.source_depth_slider)
-
-        self.source_depth_box = QGroupBox("Source Depth [m]")
-        self.source_depth_box.setLayout(self.source_depth_layout)
-        self.depth_parameters.addWidget(self.source_depth_box)
-
         # Topography limits
 
         self.topo_lim_layout = QHBoxLayout()
@@ -191,11 +176,30 @@ class MainWindow(QWidget):
         self.z0_slider.valueChanged.connect(self.enforce_slider_min)
         self.z0_layout.addWidget(self.z0_slider)
 
-        self.source_depth_slider.max_limit_source = self.z0_slider
-
         self.z0_depth_box = QGroupBox("Starting topography depth [m]:")
         self.z0_depth_box.setLayout(self.z0_layout)
         self.depth_parameters.addWidget(self.z0_depth_box)
+
+        # Source depth
+        self.source_depth_layout = QHBoxLayout()
+
+        self.source_depth_slider = QSlider(Qt.Orientation.Vertical)
+        self.source_depth_slider.setInvertedAppearance(True)
+        self.source_depth_slider.setFixedHeight(100)
+        self.source_depth_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.source_depth_slider.setMinimum(0)
+        self.source_depth_slider.setMaximum(2000)
+        self.source_depth_slider.setValue(1500)
+        self.source_depth_slider.setTickInterval(100)
+        self.source_depth_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.source_depth_slider.valueChanged.connect(self.enforce_slider_max)
+        self.source_depth_layout.addWidget(self.source_depth_slider)
+
+        self.source_depth_box = QGroupBox("Source Depth [m]")
+        self.source_depth_box.setLayout(self.source_depth_layout)
+        self.depth_parameters.addWidget(self.source_depth_box)
+
+        self.source_depth_slider.max_limit_source = self.z0_slider
 
         # dynamically update maximums of all slider bars
         self.depth_choice.textEdited.connect(lambda text, s = self.source_depth_slider: self.update_slider_max(s))
@@ -257,7 +261,7 @@ class MainWindow(QWidget):
                 color: {self.style_colors['text-pressed']};
             }}
         """)
-        self.simulation_button.clicked.connect(self.button_clicked)
+        self.simulation_button.clicked.connect(self.simulation_button_clicked)
         self.main_layout.addWidget(self.simulation_button)
 
         # Add stretch to push everything up
@@ -284,12 +288,12 @@ class MainWindow(QWidget):
         # =============================
         self.setLayout(self.main_layout)
 
-        self.update_plot()
+        self.update_parameter_plot()
         
     # ---------------------------------------------------------
     # Event methods
     # ---------------------------------------------------------
-    def button_clicked(self):
+    def simulation_button_clicked(self):
         self.simulation_button.setText("Running Simulation...")
         self.ax.clear()
         print("Running Simulation...")
@@ -302,7 +306,32 @@ class MainWindow(QWidget):
         self.progress_bar.setFormat("%v percent finished")
         self.main_layout.addWidget(self.progress_bar)
 
-        self.show_plot()
+        # Disable the run button to prevent re-entrant runs while the solver is executing
+        self.show_simulation_plot()
+        self.simulation_button.setText("Simulation Complete! Click to Run Another.")
+        self.simulation_button.clicked.disconnect(self.simulation_button_clicked)
+        self.simulation_button.clicked.connect(self.redo_simulation_button_clicked)
+
+    def redo_simulation_button_clicked(self):
+        self.fig.clear()
+        self.simulation_button.setText("Run Simulation")
+        self.simulation_button.clicked.disconnect(self.redo_simulation_button_clicked)
+        self.simulation_button.clicked.connect(self.simulation_button_clicked)
+
+        self.canvas.deleteLater()
+        self.fig = Figure(figsize = (15,5))
+        self.canvas = FigureCanvas(self.fig)
+        self.ax = self.canvas.figure.add_subplot(111)
+        self.ax.set_title("Parameter Visualization")
+        self.ax.set_xlabel("Range [m]")
+        self.ax.set_ylabel("Depth [m]")
+        self.ax.set_ylim([0, 2000])
+        self.ax.set_xlim([0, 2000])
+        self.ax.invert_yaxis()
+
+        self.main_layout.addWidget(self.canvas)
+
+        self.update_parameter_plot()
 
     def update_dict(self, key, text):
         """Called whenever a QLineEdit or QComboBox value changes."""
@@ -317,9 +346,9 @@ class MainWindow(QWidget):
             f"Topography Starting Depth: {self.values['z_0']}\n"
         )
         self.display.setText(display_text)
-        self.update_plot()
+        self.update_parameter_plot()
 
-    def update_plot(self):
+    def update_parameter_plot(self):
         self.ax.clear()
         self.ax.set_title("Parameter Visualization")
         self.ax.set_xlabel("Range [m]")
@@ -372,13 +401,26 @@ class MainWindow(QWidget):
         # Redraw canvas
         self.canvas.draw_idle()
 
-    def show_plot(self):
+    def show_simulation_plot(self):
         """Clears and re-runs the solver plot."""
         self.ax.clear()
-        run_solver_from_gui(self.values, self.canvas.figure, self.ax, progress_callback=self.update_progress)
-        self.progress_bar.deleteLater()
-        self.progress_bar = None
-        self.simulation_button.setText("Run Simulation")
+
+        try:
+            run_solver_from_gui(self.values, self.canvas.figure, self.ax, progress_callback=self.update_progress)
+        except Exception:
+            # Ensure the progress bar is cleaned up and the GUI is left in a sane state
+            if getattr(self, 'progress_bar', None) is not None:
+                self.progress_bar.deleteLater()
+                self.progress_bar = None
+            self.simulation_button.setText("Run Simulation")
+            self.canvas.draw()
+            raise
+
+        # Clean up progress bar and restore UI state
+        if getattr(self, 'progress_bar', None) is not None:
+            self.progress_bar.deleteLater()
+            self.progress_bar = None
+
         self.canvas.draw()
         self.canvas.show()
 
@@ -428,7 +470,6 @@ class MainWindow(QWidget):
             slider.blockSignals(True)
             slider.setValue(int(min_depth))
             slider.blockSignals(False)
-
 
 def main():
     app = QApplication(sys.argv)

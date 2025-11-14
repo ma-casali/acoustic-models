@@ -179,17 +179,25 @@ class ParabolicWaveEquationSolver:
         return self.u
 
     def plot(self, fig = None, ax = None, min_TL = -60):
-        
-        if fig == None or ax == None:
+        if fig is None or ax is None:
             fig, ax = plt.subplots(figsize = (15, 5))
 
-        im = ax.pcolormesh(self.r_mesh, self.z_mesh[1:-1], np.transpose(20*np.log10(np.abs(self.u[:,1:-1]/np.max(self.u[0,1:-1])))), vmin = min_TL, shading='gouraud', cmap = 'turbo')
+        im = ax.pcolormesh(
+            self.r_mesh,
+            self.z_mesh[1:-1],
+            np.transpose(20*np.log10(np.abs(self.u[:,1:-1]/np.max(self.u[0,1:-1])))),
+            vmin = min_TL,
+            shading='gouraud',
+            cmap = 'turbo'
+        )
         ax.plot(self.r_mesh, self.topography, 'w')
         ax.set_xlabel('Range [m]')
         ax.set_ylim([0,self.env.z_lims[1]])
+
+        # create and store the colorbar so it can be removed on next plot
         cbar = fig.colorbar(im, ax=ax, label='TL [dB]')
-            
+
         ax.invert_yaxis()
         ax.set_ylabel('Depth [m]')
-        
+
         plt.savefig('Figures/sample_figure.png')
