@@ -602,6 +602,7 @@ class MainWindow(QWidget):
         self.frequency_choice.setPlaceholderText("50")
         self.frequency_choice.setFixedWidth(300)
         self.frequency_choice.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.frequency_choice.editingFinished.connect(lambda: self.config.set('f', self.frequency_choice.text()))
         self.frequency_layout.addWidget(self.frequency_choice)
 
         self.frequency_box = QGroupBox("Frequency Settings")
@@ -662,15 +663,23 @@ class MainWindow(QWidget):
         # Plot Canvas
         # =============================
 
+                # Determine the correct ylabel
+        cfg = self.config.as_dict()
+        env_type = cfg.get("Environment", "Water")
+        y_label = "Depth" if env_type == "Water" else "Altitude"
+
         self.fig = Figure(figsize = (15,5))
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.canvas.figure.add_subplot(111)
         self.ax.set_title("Parameter Visualization")
         self.ax.set_xlabel("Range [m]")
-        self.ax.set_ylabel("Depth [m]")
+        self.ax.set_ylabel(f"{y_label} [m]")
         self.ax.set_ylim([0, 2000])
         self.ax.set_xlim([0, 2000])
-        self.ax.invert_yaxis()
+        if env_type == "Water":
+            self.ax.yaxis.set_inverted(True)
+        else:
+            self.ax.yaxis.set_inverted(False)
 
         self.main_layout.addWidget(self.canvas)
 
@@ -686,6 +695,13 @@ class MainWindow(QWidget):
     # ---------------------------------------------------------
     def on_environment_changed(self, index):
         """Handle changes to the environment selection."""
+        # Map the index to the actual string value
+        env_map = {0: "--", 1: "Air", 2: "Water"}
+        selected_env = env_map.get(index, "--")
+
+        # update the config data
+        self.config.set('Environment', selected_env)
+
         if index == 0:
             # Reset to default values or hide controls
             self.environment_stack.setCurrentIndex(0)
@@ -706,12 +722,16 @@ class MainWindow(QWidget):
 
         cfg = self.config.as_dict()
 
+        # Determine the correct ylabel
+        env_type = cfg.get("Environment", "Water")
+        y_label = "Depth" if env_type == "Water" else "Altitude"
+
         # textual display of current parameters
         display_text = (
             f"Environment: {cfg['Environment']}\n"
             f"Frequency: {cfg['f']} [Hz]\n"
             f"Range: {cfg['r_max']} [m]\n"
-            f"Depth: {cfg['z_max']} [m]\n"
+            f"{y_label}: {cfg['z_max']} [m]\n"
             f"Source Depth: {cfg['z_s']} [m]\n"
             f"Topography Limits: [{cfg['topo_min']}, {cfg['topo_max']}] [m]\n"
             f"Topography Starting Depth: {cfg['z_0']}\n"
@@ -721,8 +741,7 @@ class MainWindow(QWidget):
         self.ax.clear()
         self.ax.set_title("Parameter Visualization")
         self.ax.set_xlabel("Range [m]")
-        self.ax.set_ylabel("Depth [m]")
-        self.ax.invert_yaxis()
+        self.ax.set_ylabel(f"{y_label} [m]")
 
         # Helper function to safely convert values
         def safe_float(val, default=0):
@@ -799,16 +818,24 @@ class MainWindow(QWidget):
         self.simulation_button.clicked.disconnect(self.redo_simulation_button_clicked)
         self.simulation_button.clicked.connect(self.simulation_button_clicked)
 
+        # Determine the correct ylabel
+        cfg = self.config.as_dict()
+        env_type = cfg.get("Environment", "Water")
+        y_label = "Depth" if env_type == "Water" else "Altitude"
+
         self.canvas.deleteLater()
         self.fig = Figure(figsize = (15,5))
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.canvas.figure.add_subplot(111)
         self.ax.set_title("Parameter Visualization")
         self.ax.set_xlabel("Range [m]")
-        self.ax.set_ylabel("Depth [m]")
+        self.ax.set_ylabel(f"{y_label} [m]")
         self.ax.set_ylim([0, 2000])
         self.ax.set_xlim([0, 2000])
-        self.ax.invert_yaxis()
+        if env_type == "Water":
+            self.ax.yaxis.set_inverted(True)
+        else:
+            self.ax.yaxis.set_inverted(False)
 
         self.main_layout.addWidget(self.canvas)
 

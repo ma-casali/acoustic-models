@@ -31,7 +31,7 @@ def run_solver_from_gui(input_dict, fig, ax, progress_callback = None):
     """
     Main function to create and run the solver.
     """
-    roughness = 5     # m - roughness parameter for topography generation
+    roughness = 25    # m - roughness parameter for topography generation
     
     if input_dict['Environment'] == 'Air':
         # Create Air environment
@@ -46,7 +46,7 @@ def run_solver_from_gui(input_dict, fig, ax, progress_callback = None):
         )
     else:
         # Create Water environment
-        print("Creating Air environment...")
+        print("Creating Water environment...")
         env = Water(
             f=int(input_dict['f']),
             z_0=int(input_dict['z_0']),
