@@ -4,6 +4,7 @@ import scipy.sparse as sp
 from scipy.sparse.linalg import spsolve, splu
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 from PropagationEnvironment import PropagationEnvironment
 
 class ParabolicWaveEquationSolver:
@@ -179,6 +180,10 @@ class ParabolicWaveEquationSolver:
         return self.u
 
     def plot(self, fig = None, ax = None, min_TL = -60):
+        z_max = self.env.z_lims[1]
+        def reverse_label(z, pos):
+            return f"{int(z_max - z)}"
+
         if fig is None or ax is None:
             fig, ax = plt.subplots(figsize = (15, 5))
 
@@ -198,6 +203,11 @@ class ParabolicWaveEquationSolver:
         cbar = fig.colorbar(im, ax=ax, label='TL [dB]')
 
         ax.invert_yaxis()
-        ax.set_ylabel('Depth [m]')
-
+        if self.env.name == 'water':
+            ax.set_ylabel('Depth [m]')
+        elif self.env.name == 'air':
+            ax.set_ylabel('Altitude [m]')
+            ax.yaxis.set_major_formatter(FuncFormatter(reverse_label))
+            ax.get_xticklabels
+            
         plt.savefig('Figures/sample_figure.png')
