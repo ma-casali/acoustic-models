@@ -35,8 +35,6 @@ class BeamformingArray:
         # get element de and az angles of rotation
         self.element_de = np.arctan2(self.eX[:, 2], self.eX[:, 0])
         self.element_az = np.arctan2(self.eX[:, 1], self.eX[:, 0]) 
-        print(self.element_de*180/np.pi)
-        print(self.element_az*180/np.pi)
 
         # confirm that element axes are orthogonal
         for i in range(len(self.X)):
@@ -61,11 +59,11 @@ class BeamformingArray:
         
         elif self.element_directivity == ElementDirectivity.DIPOLE:
             # dipole oriented along the x-axis of the element
-            return np.abs(np.cos(DE - element_de) * np.cos(AZ - element_az))
+            return np.abs(np.cos(DE - element_de))
         
         elif self.element_directivity == ElementDirectivity.BAFFLED_DIPOLE:
             # baffled dipole oriented along the x-axis of the element
-            return np.abs(np.cos(DE - element_de) * np.cos(AZ - element_az)) * (DE - element_de >= 0)
+            return np.abs(np.cos(DE - element_de)) * (DE - element_de >= 0)
         
         elif self.element_directivity == ElementDirectivity.CUSTOM:
             if custom_directivity_function is None:
@@ -103,56 +101,72 @@ class BeamformingModel:
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
-        element_positions = np.stack((self.array.X, self.array.Y, self.array.Z), axis=-1)
-        direction = np.array([np.cos(steer_de),
+        element_positions = np.stack((self.array.X, self.array.Y, self.array.Z), axis=-1) # shape (num_elements, 3)
+        directions = np.stack((np.cos(steer_de),
                               np.sin(steer_az) * np.sin(steer_de),
-                              np.cos(steer_az) * np.sin(steer_de)])
+                              np.cos(steer_az) * np.sin(steer_de)), axis = -1) # shape (len(steer_az), len(steer_de), 3)
 
-        path_lengths = np.dot(element_positions, direction)
-        steering_vector = np.exp(-1j * k * path_lengths)
+        path_lengths = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (len(steer_az), len(steer_de), num_elements)
+        steering_vector = np.exp(1j * k * path_lengths)
 
         return steering_vector
     
-    def compute_element_vector(self, plane_wave_direction, frequency):
+    def compute_manifold_vector(self, pw_az, pw_de, frequency):
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
-        element_positions = np.concatenate((self.array.X[:, np.newaxis], self.array.Y[:, np.newaxis], self.array.Z[:, np.newaxis]), axis=1)
+        directions = np.stack((np.cos(pw_de),
+                        np.sin(pw_az) * np.sin(pw_de), 
+                        np.cos(pw_az) * np.sin(pw_de)), axis=-1) # shape (len(az), len(de), 3)
 
-        element_vector = np.zeros(len(element_positions), dtype=complex)
-        for i, mic in enumerate(element_positions):
-            distance = np.dot(mic, plane_wave_direction)
-            element_vector[i] = np.exp(-1j * k * distance)
+        # m = element index, k = XYZ
+        element_positions = np.stack([self.array.X, self.array.Y, self.array.Z], axis=1) # shape (num_elements, 3)
+        
+        phases = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (num_elements, len(az)*len(de))
+        element_directivity = self.array.compute_element_directivity(pw_az, pw_de) # shape (len(az), len(de))
+        manifold_vector = element_directivity * np.exp(-1j * k * phases) # shape ( len(az), len(de), num_elements)
 
-        return element_vector
+        return manifold_vector
     
-    def compute_shading_vector(self, plane_wave_directions, frequency):
+    def apply_spatial_filter(self, signals, steer_az, steer_de, frequency, nperseg: int = 1024):
+        steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency) 
+
+        # for memory safety, compute the output signal in chunks along the time dimension
+        num_chunks = int(np.ceil(signals.shape[0] / nperseg))
+        output_power = np.zeros((steering_vector.shape[0], steering_vector.shape[1], num_chunks))
+        for i in range(num_chunks):
+            start_idx = i * nperseg
+            end_idx = min((i + 1) * nperseg, signals.shape[0])
+            chunk = signals[start_idx:end_idx]
+
+            # Compute the beam output for this chunk: (Az, De, Samples)
+            beam_chunk = np.einsum('ijm, mk -> ijk', steering_vector.conj(), chunk.T)
+            
+            # Compute the rms power
+            output_power[:,:,i] = np.sqrt(np.mean(np.abs(beam_chunk)**2, axis=2))
+
+        return output_power
+    
+    def compute_shading_vector(self, pw_az, pw_de, frequency):
         # this will contain a formulation of the shading vector use to control sidelobes and mainlobe width, for now we will use a simple rectangular window (no shading)
+        directions = np.stack((np.cos(pw_de),
+                np.sin(pw_az) * np.sin(pw_de), 
+                np.cos(pw_az) * np.sin(pw_de)), axis=-1) # shape (len(az), len(de), 3)
         return np.ones(len(self.array.X), dtype=complex)
     
-    def compute_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = 0, steer_de = 0, source_distance=1000):
+    def compute_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), source_distance=1000):
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
         az = np.radians(np.arange(-90, 90, delta_az)) # degrees
-        de = np.radians(np.arange(-90, 90, delta_de)) # degrees
+        de = np.radians(np.arange(0, 90, delta_de)) # degrees
         AZ, DE = np.meshgrid(az, de, indexing = 'ij')
 
-        # i = Az, j = De, k = XYZ
-        directions = np.stack((np.cos(DE),
-                               np.sin(AZ) * np.sin(DE), 
-                               np.cos(AZ) * np.sin(DE)), axis=-1) # shape (len(az), len(de), 3)
-        # m = element index, k = XYZ
-        element_positions = np.stack([self.array.X, self.array.Y, self.array.Z], axis=1) # shape (num_elements, 3)
-        
-        phases = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (num_elements, len(az)*len(de))
-        element_directivity = self.array.compute_element_directivity(AZ, DE) # shape (len(az), len(de))
-        manifold_vector = element_directivity * np.exp(-1j * k * phases) # shape ( len(az), len(de), num_elements)
-
+        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)
         steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency) # shape (num_elements,)
-        shading_vector = self.compute_shading_vector(directions, frequency) # shape (num_elements,)
+        shading_vector = self.compute_shading_vector(AZ, DE, frequency) # shape (num_elements,)
 
         beampattern = np.sum(manifold_vector * \
                              steering_vector.conj() * \
@@ -160,7 +174,7 @@ class BeamformingModel:
 
         return az, de, beampattern
     
-    def plot_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = 0, steer_de = 0, source_distance=1000):
+    def plot_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), source_distance=1000):
         az, de, beampattern = self.compute_beampattern(frequency, delta_az, delta_de, steer_az, steer_de, source_distance)
         AZ, DE = np.meshgrid(az, de, indexing = 'ij')
         beampattern = beampattern / np.max(np.abs(beampattern)) # normalize the beampattern
@@ -173,9 +187,8 @@ class BeamformingModel:
         ax[0].set_xlabel('Azimuth (degrees)')
         ax[0].set_ylabel('Elevation (degrees)')
         ax[0].set_title(f'Beamforming Pattern at {frequency} Hz')
-        ax[0].grid()
 
-        ax[1].plot(np.degrees(az), 10 * np.log10(np.abs(beampattern[:, len(de) // 2])), label='Elevation = 0°')
+        ax[1].plot(np.degrees(az), 10 * np.log10(np.abs(beampattern[:, 0])), label='Elevation = 0°')
         ax[1].set_ylim(-50, 0)
         ax[1].set_xlabel('Azimuth (degrees)')
         ax[1].set_ylabel('Beamforming Gain (dB)')
@@ -183,17 +196,20 @@ class BeamformingModel:
         ax[1].grid()
 
         # convert to cartesian coordinates for 3D plot
+        AZ, DE = np.meshgrid(np.radians(np.arange(-180, 180, delta_az)), de, indexing='ij')
         R = 10 * np.log10(np.abs(beampattern)) + 50
         R[R < 0] = 0 # set negative values to 0 for better visualization
+        R = np.concatenate((R, R), axis=0) # duplicate the beampattern to cover the full 360 degrees in azimuth
+
         X = R * np.cos(DE)
         Y = R * np.sin(AZ) * np.sin(DE)
         Z = R * np.cos(AZ) * np.sin(DE)
 
         my_cmap = cm.get_cmap('turbo') # Choose a vibrant colormap
-        colors = my_cmap(R) # colors.shape is now (360, 360, 4) - RGBA        
+        colors = my_cmap(R / np.max(R)) # colors.shape is now (360, 360, 4) - RGBA        
 
         ax[2] = plt.subplot(133, projection='3d')
-        ax[2].plot_surface(X, Y, Z, facecolors = colors)
+        ax[2].plot_surface(X, Y, Z, facecolors = colors, shade = False, cstride = 2, rstride = 2)
         ax[2].set_title(f'3D Beamforming Pattern at {frequency} Hz')
         ax[2].set_xlabel('X')
         ax[2].set_ylabel('Y')
@@ -203,6 +219,23 @@ class BeamformingModel:
         ax[2].set_zlim(-50, 50)
         ax[2].grid()
 
+    def plot_spatially_filtered_result(self, filtered_power: np.array, steer_az: np.array, steer_de: np.array):
+
+        # find max power index for one time index
+        max_inds = np.unravel_index(np.argmax(filtered_power[:,:,10]), filtered_power[:,:,10].shape)
+
+        az = np.arange(-90, 90, 5)
+        de = np.arange(0, 90, 5)
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(10 * np.log10(filtered_power[:, :, 10]/np.max(filtered_power[:, :, 10])),
+                       extent=(np.degrees(np.min(steer_az)), np.degrees(np.max(steer_az)), np.degrees(np.min(steer_de)), np.degrees(np.max(steer_de))),
+                    aspect='auto', origin='lower', vmin = -20, vmax = 0)
+        ax.scatter(az[max_inds[1]], de[max_inds[0]], c='red', marker='x', label='Estimated Source Location')
+        fig.colorbar(im, ax=ax, label='Filtered Signal RMS Power (dB)')
+        ax.set_xlabel('Azimuth (degrees)')
+        ax.set_ylabel('Elevation (degrees)')
+        ax.set_title(f'Filtered Signal RMS Power')
 
 if __name__ == "__main__":
     # Example usage`
@@ -217,6 +250,6 @@ if __name__ == "__main__":
     bf_array.plot_array_geometry()
 
     model = BeamformingModel(bf_array)
-    model.plot_beampattern(2e3, delta_az = 0.5, delta_de = 0.5) 
+    model.plot_beampattern(8e3, delta_az = 0.5, delta_de = 0.5) 
 
     plt.show()
