@@ -1,102 +1,83 @@
+from matplotlib import style
 import numpy as np
+import scipy
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from enum import Enum
+from matplotlib.animation import FuncAnimation
+from BeamformingArray import BeamformingArray, ElementDirectivity
+from ArrayShading import ArrayShading
 
-class ElementDirectivity(Enum):
-    OMNI = 'omni'
-    DIPOLE = 'dipole'
-    BAFFLED_DIPOLE = 'baffled_dipole'
-    CUSTOM = 'custom'
+def time_varying_signal(array: BeamformingArray, frequency = 400, snr_db = 500, spline_points: int = 10, T: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fixture to provide a time-varying signal to elements for testing."""
+   
+    # This source will move in a random path around the array, changing its azimuth and elevation over time.
+    bf_model = BeamformingModel(array)
 
-class BeamformingArray:
-    def __init__(self, X, Y, Z, eX = None, eY = None, eZ = None, element_directivity: ElementDirectivity = ElementDirectivity.OMNI):
+    # generate spline points for azimuth and elevation
+    az_spline_points = np.random.uniform(-90, 90, size=(spline_points,))
+    de_spline_points = np.random.uniform(0, 90, size=(spline_points,))
+    print("Azimuth spline points (degrees):", az_spline_points)
+    print("Elevation spline points (degrees):", de_spline_points)
+    az_spline = scipy.interpolate.CubicSpline(np.linspace(0, T, spline_points), az_spline_points)
+    de_spline = scipy.interpolate.CubicSpline(np.linspace(0, T, spline_points), de_spline_points)
 
-        # element positions
-        self.X = X
-        self.Y = Y
-        self.Z = Z
+    t = np.arange(0, T, 1/44100)
+    arrival_az = np.radians(az_spline(t))
+    arrival_de = np.radians(de_spline(t))
 
-        # element directivity
-        if not isinstance(element_directivity, ElementDirectivity):
-            raise ValueError("element_directivity must be an instance of ElementDirectivity Enum")
-        self.element_directivity = element_directivity
+    manifold_vector_main = bf_model.compute_manifold_vector(arrival_az, arrival_de, frequency) # shape (T, num_elements)
 
-        # element axes
-        if eX is None:
-            self.eX = np.tile(np.array([1, 0, 0]), (len(self.X), 1))
-            self.eY = np.tile(np.array([0, 1, 0]), (len(self.Y), 1))
-            self.eZ = np.tile(np.array([0, 0, 1]), (len(self.Z), 1))
-        else:
-            self.eX = eX
-            self.eY = eY
-            self.eZ = eZ
-        
-        # get element de and az angles of rotation
-        self.element_de = np.arctan2(self.eX[:, 2], self.eX[:, 0])
-        self.element_az = np.arctan2(self.eX[:, 1], self.eX[:, 0]) 
+    simple_tone = np.exp(1j * 2 * np.pi * frequency * t) # shape (T,)
+    tone_array = np.real(manifold_vector_main * simple_tone[:, np.newaxis]) # shape (T, num_elements)  
 
-        # confirm that element axes are orthogonal
-        for i in range(len(self.X)):
-            assert np.isclose(np.dot(self.eX[i], self.eY[i]), 0), "eX and eY are not orthogonal for element {}".format(i)
-            assert np.isclose(np.dot(self.eX[i], self.eZ[i]), 0), "eX and eZ are not orthogonal for element {}".format(i)
-            assert np.isclose(np.dot(self.eY[i], self.eZ[i]), 0), "eY and eZ are not orthogonal for element {}".format(i)
+    signal_power = np.mean(tone_array**2)
+    noise_power = signal_power / (10**(snr_db / 10))
+    noise = np.random.normal(0, np.sqrt(noise_power), tone_array.shape)
+    tone_array += noise
 
-    def compute_element_directivity(self, AZ, DE, custom_directivity_function=None):
-        # computes the directivity of the element at the angles specified by AZ and DE (in radians)
-        # This is assumed to be in the far-field so that: 
-        #   - R (distance from source to element) >> array size 
-        #   - AZ and DE are ~= the angles of the incoming wave relative to the element's local coordinate system (eX, eY, eZ)
-        # returns an array of shape (len(AZ), len(DE), num_elements) containing the directivity values for each angle
+    return arrival_az, arrival_de, tone_array
 
-        DE = DE[:, :, np.newaxis] # shape (len(AZ), len(DE), 1)
-        AZ = AZ[:, :, np.newaxis] # shape (len(AZ), len(DE), 1)
-        element_de = self.element_de[np.newaxis, np.newaxis, :] # shape (1, 1, num_elements)
-        element_az = self.element_az[np.newaxis, np.newaxis, :] # shape (1, 1, num_elements)
+def generate_hex_array(num_elements = 16, d: float = 343/2000/4, max_angle: float = 15.0) -> BeamformingArray:
+    """Helper function to generate a hexagonal array of elements for testing."""
 
-        if self.element_directivity == ElementDirectivity.OMNI:
-            return np.ones((AZ.shape[0], AZ.shape[1], len(self.X))) 
-        
-        elif self.element_directivity == ElementDirectivity.DIPOLE:
-            # dipole oriented along the x-axis of the element
-            return np.abs(np.cos(DE - element_de))
-        
-        elif self.element_directivity == ElementDirectivity.BAFFLED_DIPOLE:
-            # baffled dipole oriented along the x-axis of the element
-            return np.abs(np.cos(DE - element_de)) * (DE - element_de >= 0)
-        
-        elif self.element_directivity == ElementDirectivity.CUSTOM:
-            if custom_directivity_function is None:
-                raise ValueError("custom_directivity_function must be provided for CUSTOM directivity")
-            return custom_directivity_function(AZ, DE)
-        else:
-            raise ValueError("Invalid element directivity type")
-        
-    def plot_array_geometry(self):
-        fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
-        ax.scatter(self.X, self.Y, self.Z, c='b', marker='o')
+    max_angle = np.radians(max_angle)
+    
+    d_horiz = d
+    d_vert = d * np.sin(np.radians(60))
 
-        # get maximum dimension of the array for scaling the vectors
-        max_dim = np.max(np.sqrt(self.X**2 + self.Y**2 + self.Z**2))
-        vector_length = max_dim * 0.1 # scale the vectors to be 10% of the maximum dimension of the array
+    coords = []
+    L = num_elements
+    for row in range(-L//2, L//2 + 1):
+        for col in range(-L//2, L//2 + 1):
+            x = 0
+            y = col * d_horiz + (row % 2) * d_horiz / 2
+            z = row * d_vert
+            coords.append((x, y, z))
 
-        ax.quiver(self.X, self.Y, self.Z, self.eX[:, 0], self.eX[:, 1], self.eX[:, 2], length=vector_length, color='r', label='eX')
-        ax.quiver(self.X, self.Y, self.Z, self.eY[:, 0], self.eY[:, 1], self.eY[:, 2], length=vector_length, color='g', label='eY')
-        ax.quiver(self.X, self.Y, self.Z, self.eZ[:, 0], self.eZ[:, 1], self.eZ[:, 2], length=vector_length, color='b', label='eZ')
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_zlabel('Z (m)')
-        ax.set_title('Array Geometry')
+    coords = np.array(coords)
+    dist_sq = coords[:,1]**2 + coords[:,2]**2
+    sorted_inds = np.argsort(dist_sq) # sort by distance from center
+    hex_coords = coords[sorted_inds][:num_elements] # shape (num_elements, 3)
 
-        ax.set_xlim(min(np.min(self.X), -max_dim), max(np.max(self.X), max_dim))
-        ax.set_ylim(min(np.min(self.Y), -max_dim), max(np.max(self.Y), max_dim))
-        ax.set_zlim(min(np.min(self.Z), -max_dim), max(np.max(self.Z), max_dim))
+    r2 = dist_sq[sorted_inds][:num_elements]
+    norm_r = np.sqrt(r2) / np.max(np.sqrt(r2))
 
+    num_circles = len(np.unique(np.round(r2, decimals=5)))
+    
+    radius_of_curvature = num_circles * d / max_angle
+    
+    hex_coords[:, 0] = radius_of_curvature * (1 - np.cos(max_angle * norm_r)) # curve the array in the x dimension based on distance from center, with a max angle of max_angle
+    
+    return hex_coords[:, 0], hex_coords[:, 1], hex_coords[:, 2]
+
+#region Beamforming Model
 class BeamformingModel:
-    def __init__(self, array):
+    def __init__(self, array: BeamformingArray):
         self.array = array
+        self.shading_model = ArrayShading(array)
 
-    def compute_steering_vector(self, steer_az, steer_de, frequency):
+    def compute_steering_vector(self, steer_az: np.ndarray, steer_de: np.ndarray, frequency: float) -> np.ndarray:
+
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
@@ -106,12 +87,19 @@ class BeamformingModel:
                               np.sin(steer_az) * np.sin(steer_de),
                               np.cos(steer_az) * np.sin(steer_de)), axis = -1) # shape (len(steer_az), len(steer_de), 3)
 
-        path_lengths = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (len(steer_az), len(steer_de), num_elements)
-        steering_vector = np.exp(1j * k * path_lengths)
+        if len(steer_az.shape) == 2:
+            path_lengths = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (len(steer_az), len(steer_de), num_elements)
+        elif len(steer_az.shape) == 1:
+            path_lengths = np.einsum('ik,mk->im', directions, element_positions) # shape (len(steer_az), num_elements)
+        else:
+            raise ValueError("steer_az and steer_de must be either 1D or 2D arrays")
+        
+        steering_vector = np.exp(-1j * k * path_lengths)
 
         return steering_vector
     
-    def compute_manifold_vector(self, pw_az, pw_de, frequency):
+    def compute_manifold_vector(self, pw_az: np.ndarray, pw_de: np.ndarray, frequency: float) -> np.ndarray:
+        
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
@@ -122,51 +110,78 @@ class BeamformingModel:
 
         # m = element index, k = XYZ
         element_positions = np.stack([self.array.X, self.array.Y, self.array.Z], axis=1) # shape (num_elements, 3)
+
+        if len(pw_az.shape) == 2:
+            phases = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (num_elements, len(az)*len(de))
+        elif len(pw_az.shape) == 1:
+            phases = np.einsum('ik,mk->im', directions, element_positions) # shape (num_elements, len(az))
+        else:
+            raise ValueError("pw_az and pw_de must be either 1D or 2D arrays")
         
-        phases = np.einsum('ijk,mk->ijm', directions, element_positions) # shape (num_elements, len(az)*len(de))
         element_directivity = self.array.compute_element_directivity(pw_az, pw_de) # shape (len(az), len(de))
         manifold_vector = element_directivity * np.exp(-1j * k * phases) # shape ( len(az), len(de), num_elements)
 
         return manifold_vector
     
-    def apply_spatial_filter(self, signals, steer_az, steer_de, frequency, nperseg: int = 1024):
+    def apply_spatial_filter(self, signals: np.ndarray, steer_az: np.ndarray, steer_de: np.ndarray, frequency: float, nperseg: int = 1024):
+       
         steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency) 
+        shading_vector = self.shading_model.compute_raised_cosine_window(p = 0.5, dims = [False, True, True]) # shape (num_elements,)
+        steering_vector = steering_vector * shading_vector[np.newaxis, np.newaxis, :] # shape (num_elements, Az*De) or (num_elements, Az) depending on the shape of steer_az
 
-        # for memory safety, compute the output signal in chunks along the time dimension
-        num_chunks = int(np.ceil(signals.shape[0] / nperseg))
-        output_power = np.zeros((steering_vector.shape[0], steering_vector.shape[1], num_chunks))
-        for i in range(num_chunks):
-            start_idx = i * nperseg
-            end_idx = min((i + 1) * nperseg, signals.shape[0])
-            chunk = signals[start_idx:end_idx]
+        # flatten steering vector angular dimensions from (Az, De, NumElements) to (Az*De, NumElements)
+        if steering_vector.ndim == 3:
+            steering_vector = np.reshape(steering_vector, (np.prod(steering_vector.shape[0:2]), steering_vector.shape[2])).T # shape (num_elements, Az*De)
 
-            # Compute the beam output for this chunk: (Az, De, Samples)
-            beam_chunk = np.einsum('ijm, mk -> ijk', steering_vector.conj(), chunk.T)
-            
-            # Compute the rms power
-            output_power[:,:,i] = np.sqrt(np.mean(np.abs(beam_chunk)**2, axis=2))
+        # split the signal into chunks to lower CPU overhead
+        num_chunks = int(signals.shape[0] // nperseg)
+        signal_chunks = signals[:num_chunks*nperseg, :].reshape(num_chunks, nperseg, signals.shape[1]) # shape (num_chunks, nperseg, num_elements)
+        pad_length = nperseg - signals[num_chunks*nperseg:, :].shape[0]
+        signal_leftover = np.pad(signals[num_chunks*nperseg:, :], ((0, pad_length), (0, 0)), mode='constant') # shape (leftover_samples, num_elements)
+        signal_chunks = np.concatenate((signal_chunks, signal_leftover[np.newaxis, :, :]), axis=0) # shape (num_chunks+1, nperseg, num_elements)
 
-        return output_power
+        beam_time_series = np.zeros((num_chunks + 1, nperseg, steering_vector.shape[1])) # shape (num_chunks, nperseg, Az*De)
+        for i in range(num_chunks + 1):
+            beam_time_series[i, :, :] = np.real(signal_chunks[i] @ steering_vector) # shape (T, Az * De)
+
+        print("Finished applying spatial filter to all signal chunks.")
+
+        beam_time_series_chunks = beam_time_series.copy() # shape (num_chunks, nperseg, Az*De)
+        beam_time_series = beam_time_series.reshape(signals.shape[0] + pad_length, steering_vector.shape[1]) # shape (T, Az*De)
+        beam_time_series = beam_time_series[:signals.shape[0], :] # remove the padded samples, shape (T, Az*De)
+        beam_time_series = beam_time_series.reshape(signals.shape[0], steer_az.shape[0], steer_de.shape[1]) # shape (T, Az, De)
+
+        return beam_time_series, beam_time_series_chunks
     
-    def compute_shading_vector(self, pw_az, pw_de, frequency):
-        # this will contain a formulation of the shading vector use to control sidelobes and mainlobe width, for now we will use a simple rectangular window (no shading)
-        directions = np.stack((np.cos(pw_de),
-                np.sin(pw_az) * np.sin(pw_de), 
-                np.cos(pw_az) * np.sin(pw_de)), axis=-1) # shape (len(az), len(de), 3)
-        return np.ones(len(self.array.X), dtype=complex)
-    
-    def compute_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), source_distance=1000):
+    def compute_beampattern(self, frequency, 
+                            delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]),
+                            shading_method = 'uniform', shading_vector = None):
+        
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
-        az = np.radians(np.arange(-90, 90, delta_az)) # degrees
-        de = np.radians(np.arange(0, 90, delta_de)) # degrees
+        az = np.radians(np.arange(-180, 180, delta_az)) # degrees
+        de = np.radians(np.arange(-90, 90, delta_de)) # degrees
         AZ, DE = np.meshgrid(az, de, indexing = 'ij')
 
+        # compute vectors needed to compute the beampattern
         manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)
         steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency) # shape (num_elements,)
-        shading_vector = self.compute_shading_vector(AZ, DE, frequency) # shape (num_elements,)
+        if shading_method == 'uniform':
+            shading_vector = np.ones(len(self.array.X)) # shape (num_elements,)
+        elif shading_method == 'raised_cosine':
+            shading_vector = self.shading_model.compute_raised_cosine_window(p = 0.5, dims = [False, True, True]) # shape (num_elements,)
+        elif shading_method == 'kaiser':
+            shading_vector = self.shading_model.compute_kaiser_window(beta = 3, dims = [False, True, True]) # shape (num_elements,)
+        elif shading_method == 'custom':
+            if (shading_vector == None).any():
+                raise ValueError("Custom shading vector must be provided when shading_method is 'custom'")
+            else:
+                shading_vector = shading_vector
+                steering_vector = np.ones_like(steering_vector) # ignore the steering vector when using custom shading, since the custom shading can already include steering by having complex values
+        else:
+            raise ValueError("Invalid shading method. Must be one of 'uniform', 'raised_cosine', 'kaiser', or 'custom'.")
 
         beampattern = np.sum(manifold_vector * \
                              steering_vector.conj() * \
@@ -174,61 +189,82 @@ class BeamformingModel:
 
         return az, de, beampattern
     
-    def plot_beampattern(self, frequency, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), source_distance=1000):
-        az, de, beampattern = self.compute_beampattern(frequency, delta_az, delta_de, steer_az, steer_de, source_distance)
-        AZ, DE = np.meshgrid(az, de, indexing = 'ij')
-        beampattern = beampattern / np.max(np.abs(beampattern)) # normalize the beampattern
+    def least_squares_beamforming_weights(self, az: np.ndarray, de: np.ndarray, B_p: np.ndarray, frequency: float = None) -> np.ndarray:
+        """For a given beampattern, compute the least squares beamforming weights that would produce that beampattern."""
 
-        fig, ax = plt.subplots(1, 3, figsize=(15, 7))
+        if frequency is None:
+            frequency = self.array.design_frequency
+
+        assert az.ndim == 1 and de.ndim == 1, "az and de must be 1D arrays"
+        assert B_p.shape == (len(az), len(de)), f"B_p must have shape {(len(az), len(de))}, but got {B_p.shape}"
+        assert B_p.dtype == np.complex128 or B_p.dtype == np.complex64, "B_p must be a complex-valued array"
+
+        AZ, DE = np.meshgrid(az, de, indexing='ij')
+
+        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency) # shape (len(az), len(de), num_elements)
+
+        # flatten the angular dimensions of the manifold vector and target beam pattern 
+        manifold_vector_flat = manifold_vector.reshape(-1, manifold_vector.shape[2]) # shape (Az*De, num_elements)
+        B_p_flat = B_p.reshape(-1, 1) # shape (Az*De, 1)
+
+        M, N = manifold_vector_flat.shape
+        W_spatial = np.sqrt(np.cos(DE.flatten())[:, np.newaxis]) # shape (Az*De, 1)
+
+        num_elements = manifold_vector_flat.shape[1]
+
+        def residual_function(w_flat):
+            
+            # reconstruct the complex weights from the flattened real and imaginary parts
+            w_real = w_flat[:num_elements]
+            w_imag = w_flat[num_elements:]
+            w = w_real + 1j * w_imag # shape (num_elements,)
+
+            current_pattern = w.conj().T @ manifold_vector_flat.T # shape (Az*De, 1)
+
+            diff = current_pattern - B_p_flat.flatten() # shape (Az*De, 1)
+
+            return np.concatenate([np.real(diff), np.imag(diff)])
         
-        im = ax[0].imshow(10 * np.log10(np.abs(beampattern.T)), extent=(np.degrees(np.min(az)), np.degrees(np.max(az)), np.degrees(np.min(de)), np.degrees(np.max(de))), aspect='auto', origin='lower', vmin = -50, vmax = 0)
-        fig.colorbar(im, ax=ax[0], label='Beamforming Gain (dB)')
-        ax[0].contour(10 * np.log10(np.abs(beampattern.T)), levels=[-3], colors='red', extent=(np.degrees(np.min(az)), np.degrees(np.max(az)), np.degrees(np.min(de)), np.degrees(np.max(de))), linewidths=2)
-        ax[0].set_xlabel('Azimuth (degrees)')
-        ax[0].set_ylabel('Elevation (degrees)')
-        ax[0].set_title(f'Beamforming Pattern at {frequency} Hz')
+        def jacobian_func(x):
+            """
+            Returns jacobian matrix J, where J[i, j] = d(residual_function[i]) / d(x[j])
+            Rows: 2*M (real then imaginary parts of the residuals)
+            Columns: 2*N (real then imaginary parts of the weights) 
+            """
 
-        ax[1].plot(np.degrees(az), 10 * np.log10(np.abs(beampattern[:, 0])), label='Elevation = 0°')
-        ax[1].set_ylim(-50, 0)
-        ax[1].set_xlabel('Azimuth (degrees)')
-        ax[1].set_ylabel('Beamforming Gain (dB)')
-        ax[1].set_title(f'Beamforming Pattern at {frequency} Hz (Elevation = 0°)')
-        ax[1].grid()
+            V_w = (manifold_vector_flat * W_spatial)
 
-        # convert to cartesian coordinates for 3D plot
-        AZ, DE = np.meshgrid(np.radians(np.arange(-180, 180, delta_az)), de, indexing='ij')
-        R = 10 * np.log10(np.abs(beampattern)) + 50
-        R[R < 0] = 0 # set negative values to 0 for better visualization
-        R = np.concatenate((R, R), axis=0) # duplicate the beampattern to cover the full 360 degrees in azimuth
+            J = np.block([
+                [V_w.real, -V_w.imag],
+                [V_w.imag, -V_w.real]
+            ])
 
-        X = R * np.cos(DE)
-        Y = R * np.sin(AZ) * np.sin(DE)
-        Z = R * np.cos(AZ) * np.sin(DE)
+            return J
 
-        my_cmap = cm.get_cmap('turbo') # Choose a vibrant colormap
-        colors = my_cmap(R / np.max(R)) # colors.shape is now (360, 360, 4) - RGBA        
+        # initial guess of uniform shading with no phase shifts
+        initial_w_flat = np.concatenate([np.ones(num_elements), np.zeros(num_elements)])
 
-        ax[2] = plt.subplot(133, projection='3d')
-        ax[2].plot_surface(X, Y, Z, facecolors = colors, shade = False, cstride = 2, rstride = 2)
-        ax[2].set_title(f'3D Beamforming Pattern at {frequency} Hz')
-        ax[2].set_xlabel('X')
-        ax[2].set_ylabel('Y')
-        ax[2].set_zlabel('Z')
-        ax[2].set_xlim(-50, 50)
-        ax[2].set_ylim(-50, 50)
-        ax[2].set_zlim(-50, 50)
-        ax[2].grid()
+        res = scipy.optimize.least_squares(residual_function, initial_w_flat, jac = jacobian_func, method='lm')
 
-    def plot_spatially_filtered_result(self, filtered_power: np.array, steer_az: np.array, steer_de: np.array):
+        w_opt = res.x[:num_elements] + 1j * res.x[num_elements:]
+
+        return w_opt, res.cost, res.message
+
+#region Plotting Functions
+class BeamformingPlot:
+    def __init__(self, bf_model: BeamformingModel):
+        self.bf_model = bf_model
+
+    def plot_spatially_filtered_result(self, filtered_power: np.array, steer_az: np.array, steer_de: np.array, frame_idx: int = 0):
 
         # find max power index for one time index
-        max_inds = np.unravel_index(np.argmax(filtered_power[:,:,10]), filtered_power[:,:,10].shape)
+        max_inds = np.unravel_index(np.argmax(filtered_power[:,:,frame_idx]), filtered_power[:,:,frame_idx].shape)
 
         az = np.arange(-90, 90, 5)
-        de = np.arange(0, 90, 5)
+        de = np.arange(-90, 90, 5)
 
         fig, ax = plt.subplots()
-        im = ax.imshow(10 * np.log10(filtered_power[:, :, 10]/np.max(filtered_power[:, :, 10])),
+        im = ax.imshow(10 * np.log10(filtered_power[:, :, frame_idx]/np.max(filtered_power[:, :, frame_idx])),
                        extent=(np.degrees(np.min(steer_az)), np.degrees(np.max(steer_az)), np.degrees(np.min(steer_de)), np.degrees(np.max(steer_de))),
                     aspect='auto', origin='lower', vmin = -20, vmax = 0)
         ax.scatter(az[max_inds[1]], de[max_inds[0]], c='red', marker='x', label='Estimated Source Location')
@@ -237,19 +273,255 @@ class BeamformingModel:
         ax.set_ylabel('Elevation (degrees)')
         ax.set_title(f'Filtered Signal RMS Power')
 
+    def setup_animation_plot(self, beam_power, steer_az, steer_de, arrival_az, arrival_de):
+        fig, ax = plt.subplots()
+        
+        # Initialize the image with the first frame
+        initial_data = 10 * np.log10(beam_power[:, :, 0] / np.max(beam_power[:, :, 0]))
+        im = ax.imshow(initial_data.T,
+                    extent=(np.degrees(np.min(steer_az)), np.degrees(np.max(steer_az)), 
+                            np.degrees(np.min(steer_de)), np.degrees(np.max(steer_de))),
+                    aspect='auto', origin='lower', vmin=-20, vmax=0, cmap='turbo')
+        
+        path_line, = ax.plot([], [], 'w-', label='Actual Source Path')
+        
+        # Initialize the scatter point for max power
+        max_point, = ax.plot([], [], 'rx', label='Estimated Source Location')
+        
+        fig.colorbar(im, ax=ax, label='Filtered Signal RMS Power (dB)')
+        ax.set_xlabel('Azimuth (degrees)')
+        ax.set_ylabel('Elevation (degrees)')
+        
+        return fig, ax, im, max_point, path_line
+    
+    def example_beampattern_animation(self):
+
+        # Example source detection test
+        arrival_az, arrival_de, tone_array = time_varying_signal(self.bf_model.array, 
+                                                                frequency = frequency, 
+                                                                snr_db = 400, 
+                                                                spline_points = 5, 
+                                                                T = 15)
+
+        # Use a range of angles for the spatial filter to create a "map"
+        az = np.radians(np.arange(-90, 90, 2.5))
+        de = np.radians(np.arange(0, 90, 2.5))
+        steer_az, steer_de = np.meshgrid(az, de, indexing='ij')
+
+        _, bts_chunks = self.bf_model.apply_spatial_filter(tone_array, steer_az, steer_de, frequency=frequency, nperseg=4096)
+
+        # Compute the power of the filtered signal for each steering angle for windowed time steps
+        beam_power = np.mean(np.abs(bts_chunks)**2, axis=1) # shape (num_chunks, nperseg, Az * De)
+        beam_power = beam_power.transpose(1, 0) # shape (Az * De, num_chunks, 1)
+        beam_power = beam_power.reshape(steer_az.shape[0], steer_de.shape[1], -1) # shape (Az, De, num_chunks)
+
+        print("Finished computing beam power for all time steps and steering angles.")
+
+        # Setup the figure
+        fig, ax, im, max_point, path_line = self.setup_animation_plot(beam_power, steer_az, steer_de, arrival_az, arrival_de)
+
+        def update(frame):
+            # Calculate normalized power for this frame
+            frame_data = beam_power[:, :, frame]
+            norm_power = 10 * np.log10(frame_data / np.max(beam_power[:, :, frame]))
+
+            # Update the image
+            im.set_array(norm_power.T)
+
+            # Update the "Max Power" marker
+            max_inds = np.unravel_index(np.argmax(frame_data), frame_data.shape)
+            # Map indices back to degrees
+            curr_az = np.degrees(az[max_inds[0]])
+            curr_de = np.degrees(de[max_inds[1]])
+            max_point.set_data([curr_az], [curr_de])
+            arrival_index = frame * 4096 % len(arrival_az) # loop through the arrival angles if we run out of time steps
+            path_line.set_data(np.degrees(arrival_az[:frame*4096]), np.degrees(arrival_de[:frame*4096]))
+            
+            return im, max_point, path_line
+
+        # Create animation: interval is in ms (200ms = 5 frames per second)
+        ani = FuncAnimation(fig, update, frames=beam_power.shape[2], interval=int(4096/44100*1000), blit=True)
+        ani.save('AcousticBeamforming/Figures/beamforming_animation.gif', writer='pillow', fps = int(44100/4096), dpi = 100)
+
+        plt.show()
+
+    def plot_beampattern_image(self, az, de, beampattern, method = 'rectangular'):
+
+        assert method in ['rectangular', 'polar'], "Method must be either 'rectangular' or 'polar'"
+
+        if np.max(beampattern) != 0:
+            beampattern = np.abs(beampattern) / np.max(np.abs(beampattern)) # normalize the beampattern for better visualization
+            beampattern = 10 * np.log10(beampattern) # convert to dB scale
+        
+        if method == 'rectangular':
+        
+            fig, ax = plt.subplots()
+            
+            im = ax.imshow(beampattern.T,
+                            extent=(np.degrees(np.min(az)), np.degrees(np.max(az)), np.degrees(np.min(de)), np.degrees(np.max(de))),
+                                aspect='auto', origin='lower', vmin = -50, vmax = 0, cmap = 'turbo')
+            fig.colorbar(im, ax=ax, label='Beamforming Gain (dB)')
+            ax.contour(beampattern.T,
+                        levels=[-3], colors='red',
+                            extent=(np.degrees(np.min(az)), np.degrees(np.max(az)), np.degrees(np.min(de)), np.degrees(np.max(de))), linewidths=2)
+            ax.set_xlabel('Azimuth (degrees)')
+            ax.set_ylabel('Elevation (degrees)')
+
+        if method == 'polar':
+            fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
+            
+            R_COORD = de
+            AZ_MESH, R_MESH = np.meshgrid(az, R_COORD, indexing='ij')
+
+            # 2. Plot using the new radial mesh
+            im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', vmin=-50, vmax=0, cmap='turbo')
+            
+            fig.colorbar(im, ax=ax, label='Beamforming Gain (dB)')
+            
+            # Ensure contour uses the same transformed mesh
+            ax.contour(AZ_MESH, R_MESH, beampattern, levels=[-3], colors='red', linewidths=2)
+
+            # 3. Fix the labels so the user still sees "Elevation" values
+            ax.set_theta_zero_location('N')
+            ax.set_theta_direction(-1)
+            
+            # Radial limits: 0 at center, 90 at edge
+            ax.set_rlim(0, np.radians(90))
+            
+            # Map radial positions [0, 30, 60, 90] to Elevation labels [0, 30, 60, 90]
+            # Note: center (radius 0) is now 0° elevation
+            ticks = np.radians([0, 30, 60, 90])
+            ax.set_rticks(ticks)
+            ax.set_yticklabels(['0°', '30°', '60°', '90°'])
+            
+            ax.set_xlabel('Azimuth (degrees)')
+            # Position the label so it doesn't overlap
+            ax.yaxis.set_label_coords(0.5, 1.1) 
+            ax.set_ylabel('Elevation (degrees)')
+
+    def plot_beampattern_slice(self, ax, az, de, beampattern, slice_az = None, slice_de = None, label_text: str = '', style: str = 'polar'):
+        
+        assert (slice_az is not None) or (slice_de is not None), "Either slice_az or slice_de must be provided"
+        assert (style in ['polar', 'cartesian']), "Style must be either 'polar' or 'cartesian'"
+
+        if np.max(beampattern) != 0:
+            beampattern = np.abs(beampattern) / np.max(np.abs(beampattern)) # normalize the beampattern for better visualization
+            beampattern_dB = 10 * np.log10(beampattern) # convert to dB scale\
+
+        if slice_az is not None:
+            if style == 'polar':
+                ax.plot(de, beampattern_dB[az == slice_az, :].T, label=label_text)
+                ax.set_rmax(0)
+                ax.set_rmin(-25)
+                ax.set_rticks([])
+                ax.grid(False)
+            else:   
+                ax.plot(np.degrees(de), beampattern_dB[az == slice_az, :].T, label=label_text)
+                ax.set_xlabel('Azimuth (degrees)')
+                ax.set_ylim(-50, 0)
+                ax.set_ylabel('Beamforming Gain (dB)')
+                ax.grid()
+        elif slice_de is not None:
+            if style == 'polar':
+                ax.plot(az, beampattern_dB[:, de == slice_de].T, label=label_text)
+                ax.set_xlabel('Azimuth (degrees)')
+                ax.set_rmax(0)
+                ax.set_rmin(-25)
+                ax.set_rticks([])
+            else:
+                ax.plot(np.degrees(az), beampattern_dB[:, de == slice_de].T, label=label_text)
+                ax.set_xlabel('Azimuth (degrees)')
+                ax.set_ylim(-50, 0)
+                ax.set_ylabel('Beamforming Gain (dB)')
+                ax.grid()
+
+    def plot_beampattern_3d(self, az, de, beampattern):
+
+        if np.max(beampattern) != 0:
+            beampattern = beampattern / np.max(beampattern) # normalize the beampattern for better visualization
+            beampattern = 10 * np.log10(np.abs(beampattern)) # convert to dB scale
+
+        fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+
+        # convert to cartesian coordinates for 3D plot
+        delta_az = np.degrees(np.diff(az)[0])
+        delta_de = np.degrees(np.diff(de)[0])
+        AZ, DE = np.meshgrid(np.radians(np.arange(-180, 180, delta_az)), np.radians(np.arange(-90, 90, delta_de)), indexing='ij')
+
+        R = beampattern + 50
+        R[R < 0] = 0 # set negative values to 0 for better visualization]
+        R = R[:, de >= 0] # only plot the upper hemisphere
+        R = np.concatenate((R, R), axis=0) # duplicate the beampattern to cover the full 360 degrees in azimuth
+
+        X = R * np.cos(DE)
+        Y = R * np.sin(AZ) * np.sin(DE)
+        Z = R * np.cos(AZ) * np.sin(DE)
+
+        my_cmap = cm.get_cmap('turbo') # Choose a vibrant colormap
+        colors = my_cmap(np.abs(R) / np.max(R)) # colors.shape is now (360, 360, 4) - RGBA        
+
+        ax.plot_surface(X, Y, Z, facecolors = colors, shade = False, cstride = 2, rstride = 2)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_xlim(-50, 50)
+        ax.set_ylim(-50, 50)
+        ax.set_zlim(-50, 50)
+        ax.grid()
+
+#region Example runs
 if __name__ == "__main__":
-    # Example usage`
-    d = 343/2e3/4 # element spacing of 1/4 wavelength at 2 kHz
-    y, z = np.meshgrid(np.linspace(-2*d, 2*d, 4), np.linspace(-2*d, 2*d, 4))
+    
+    d = 343/2e3/3 # element spacing of 1/2 wavelength at 2 kHz
+    frequency = 2e3
+
+    # rectangular spacing
+    num_elements_per_dim = 4
+    y, z = np.meshgrid(np.linspace(-2*d, 2*d, num_elements_per_dim), np.linspace(-2*d, 2*d, num_elements_per_dim))
+    X = np.zeros(num_elements_per_dim**2)
     Y = np.ravel(y)
     Z = np.ravel(z)
-    bf_array = BeamformingArray(X=np.zeros(16),
-                                Y=Y,
-                                Z=Z, 
-                                element_directivity=ElementDirectivity.DIPOLE)
-    bf_array.plot_array_geometry()
 
-    model = BeamformingModel(bf_array)
-    model.plot_beampattern(8e3, delta_az = 0.5, delta_de = 0.5) 
+    # hexagonal spacing
+    X, Y, Z = generate_hex_array(num_elements=61, d=d, max_angle=1.0)
+
+    bf_array = BeamformingArray(X=X,
+                                Y=Y,
+                                Z=Z,
+                                design_frequency=frequency,
+                                element_directivity=ElementDirectivity.DIPOLE)
+    
+    bf_model = BeamformingModel(bf_array)
+
+    plotter = BeamformingPlot(bf_model)
+
+    az, de, beampattern_orig = bf_model.compute_beampattern(frequency, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='raised_cosine')
+    # plotter.plot_beampattern_image(az, de, B_p)
+
+    # create target beampattern with rectangular main lobe
+    # extend the main lobe to be +/- 10 degrees in azimuth and elevation
+    az = np.radians(np.arange(-180, 180, 1))
+    de = np.radians(np.arange(-90, 90, 1))
+    AZ, DE = np.meshgrid(az, de, indexing='ij')
+    # make a mask with a null at the center and a rectangular main lobe around it
+    mask = (np.abs(np.degrees(DE)) <= 25) # rectangular main lobe with width and height of 20 degrees
+    secondary_mask = (np.abs(np.degrees(DE)) <= 10) & (np.abs(np.degrees(DE)) <= 20) # secondary rectangular lobe with width and height of 40 degrees
+    B_p = np.zeros_like(AZ, dtype = np.complex64) + (1e-12 + 0j)
+    B_p[mask] = 1 + 0j
+    B_p[secondary_mask] = 1e-12 + 0j
+
+    w_opt, cost, message = bf_model.least_squares_beamforming_weights(az, de, B_p)
+
+    print("Final cost:", cost)
+    print("Optimization message:", message)
+
+    az, de, beampattern = bf_model.compute_beampattern(frequency, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='custom', shading_vector=w_opt)
+    plotter.plot_beampattern_image(az, de, beampattern, method='polar')
+    plotter.plot_beampattern_image(az, de, B_p, method='polar')
+    # plotter.plot_beampattern_3d(az, de, B_p)
+
+    shading = ArrayShading(bf_array)
+    fig, ax = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    shading.plot_weights_on_elements(fig, ax, w_opt)
 
     plt.show()
