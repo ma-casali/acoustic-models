@@ -1,12 +1,34 @@
 import pytest
+import scipy
 import numpy as np
 from src.BeamformingModel import BeamformingArray
 from src.BeamformingModel import BeamformingModel
 
 DATA_SCENARIOS = {
-    "400Hz_Tone_HiSNR": {},
-    "400Hz_Tone_LoSNR": {},
-    "400Hz_Tone_NearField": {},
+    "400Hz_Tone_HiSNR": {
+        "frequency": 400,
+        "snr_db": 500,
+        "dropout": False,
+        "near_field": False,
+    },
+    "400Hz_Tone_Dropout": {
+        "frequency": 400,
+        "snr_db": 500,
+        "dropout": True,
+        "near_field": False,
+    },
+    "400Hz_Tone_LoSNR": {
+        "frequency": 400,
+        "snr_db": 0,
+        "dropout": False,
+        "near_field": False,
+    },
+    "400Hz_Tone_NearField": {
+        "frequency": 400,
+        "snr_db": 500,
+        "dropout": False,
+        "near_field": True,
+    }
 }
 
 @pytest.fixture
@@ -20,7 +42,7 @@ def sample_data():
         bf_model = BeamformingModel(array)
         arrival_de = np.radians(np.array([[arrival_de]]))
         arrival_az = np.radians(np.array([[arrival_az]]))
-        k = 2 * np.pi * frequency / 343; 
+
         manifold_vector_main = bf_model.compute_manifold_vector(arrival_az, arrival_de, frequency)
         manifold_vector_main = manifold_vector_main.flatten()
         simple_tone = np.exp(1j * 2 * np.pi * frequency * np.arange(0, 1, 1/44100)) # shape (num_samples,)
@@ -36,4 +58,3 @@ def sample_data():
         return tone_array
     
     return _generate
-

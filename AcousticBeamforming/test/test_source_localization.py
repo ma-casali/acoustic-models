@@ -67,3 +67,30 @@ def test_source_localization(sample_data):
     
 #     result = bf_model.apply_spatial_filter(fake_signals, az, de, 400)
 #     assert result.shape == (100, 100, 1)
+
+def test_beampatterns():
+
+    # Example usage
+    d = 343/2e3/2 # element spacing of 1/2 wavelength at 2 kHz
+    num_elements_per_dim = 4
+    y, z = np.meshgrid(np.linspace(-2*d, 2*d, num_elements_per_dim), np.linspace(-2*d, 2*d, num_elements_per_dim))
+    Y = np.ravel(y)
+    Z = np.ravel(z)
+    bf_array = BeamformingArray(X=np.zeros(num_elements_per_dim**2),
+                                Y=Y,
+                                Z=Z, 
+                                element_directivity=ElementDirectivity.DIPOLE)
+    bf_array.plot_array_geometry()
+
+    fig, ax = plt.subplots()
+
+    model = BeamformingModel(bf_array)
+    az, de, beampattern = model.compute_beampattern(2e3, shading_method='uniform')
+    _, _, beampattern_raised_cosine = model.compute_beampattern(2e3, shading_method='raised_cosine')
+    _, _, beampattern_kaiser = model.compute_beampattern(2e3, shading_method='kaiser')
+    model.plot_beampattern_slice(ax, az, de, beampattern, slice_az = 0, label_text='Uniform Shading') 
+    model.plot_beampattern_slice(ax, az, de, beampattern_raised_cosine, slice_az = 0, label_text='Raised Cosine Shading')
+    model.plot_beampattern_slice(ax, az, de, beampattern_kaiser, slice_az = 0, label_text='Kaiser Shading')
+    ax.legend()
+
+    plt.show()
