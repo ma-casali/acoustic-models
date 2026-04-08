@@ -63,12 +63,17 @@ def generate_hex_array(num_elements = 16, d: float = 343/2000/4, max_angle: floa
     norm_r = np.sqrt(r2) / np.max(np.sqrt(r2))
 
     num_circles = len(np.unique(np.round(r2, decimals=5)))
-    
     radius_of_curvature = num_circles * d / max_angle
-    
     hex_coords[:, 0] = radius_of_curvature * (1 - np.cos(max_angle * norm_r)) # curve the array in the x dimension based on distance from center, with a max angle of max_angle
     
-    return hex_coords[:, 0], hex_coords[:, 1], hex_coords[:, 2]
+    # create element axes where x-axis points to center
+    shifted_hex_coords = hex_coords.copy()
+    shifted_hex_coords[:, 0] -= radius_of_curvature
+    eX = -shifted_hex_coords / np.linalg.norm(shifted_hex_coords, axis=1)[:, np.newaxis] # shape (num_elements, 3)
+    eY = np.cross(eX, np.array([0, 0, 1])) # shape (num_elements, 3)
+    eZ = np.cross(eX, eY) # shape (num_elements, 3)
+
+    return hex_coords[:, 0], hex_coords[:, 1], hex_coords[:, 2], eX, eY, eZ
 
 #region Beamforming Model
 class BeamformingModel:
@@ -188,6 +193,18 @@ class BeamformingModel:
                                 shading_vector, axis = 2)
 
         return az, de, beampattern
+    
+    def compute_nearfield_beampattern(self):
+
+        """Computation of the nearfield beampattern, by using inter-element time difference. 
+        The near-field should be identified by measuring the time differences between elements, via x-correlation.
+        When a certain threshold of the curvature of time difference is met, the source is identified as being in the near-field."""
+
+        # 1. minimum time difference between elements that shows curvature
+        #   a. dt = 1/fs -> a linear time difference will look like [-dt, 0, dt], but curved will be [dt, 0, dt]
+        #   b. Measure across elements of the array: middle, and two radially extreme elements
+
+        # Far-field approximation is broken when 
     
     def least_squares_beamforming_weights(self, az: np.ndarray, de: np.ndarray, B_p: np.ndarray, frequency: float = None) -> np.ndarray:
         """For a given beampattern, compute the least squares beamforming weights that would produce that beampattern."""
@@ -423,17 +440,16 @@ class BeamformingPlot:
                 ax.grid()
         elif slice_de is not None:
             if style == 'polar':
-                ax.plot(az, beampattern_dB[:, de == slice_de].T, label=label_text)
+                ax.plot(az, beampattern_dB[:, de == slice_de], label=label_text)
                 ax.set_xlabel('Azimuth (degrees)')
                 ax.set_rmax(0)
                 ax.set_rmin(-25)
                 ax.set_rticks([])
             else:
-                ax.plot(np.degrees(az), beampattern_dB[:, de == slice_de].T, label=label_text)
+                ax.plot(np.degrees(az), beampattern_dB[:, de == slice_de], label=label_text)
                 ax.set_xlabel('Azimuth (degrees)')
                 ax.set_ylim(-50, 0)
                 ax.set_ylabel('Beamforming Gain (dB)')
-                ax.grid()
 
     def plot_beampattern_3d(self, az, de, beampattern):
 
@@ -471,57 +487,92 @@ class BeamformingPlot:
 
 #region Example runs
 if __name__ == "__main__":
-    
-    d = 343/2e3/3 # element spacing of 1/2 wavelength at 2 kHz
-    frequency = 2e3
 
-    # rectangular spacing
-    num_elements_per_dim = 4
-    y, z = np.meshgrid(np.linspace(-2*d, 2*d, num_elements_per_dim), np.linspace(-2*d, 2*d, num_elements_per_dim))
-    X = np.zeros(num_elements_per_dim**2)
-    Y = np.ravel(y)
-    Z = np.ravel(z)
+    dZ = (1 + 3/16) * 2.54 * 1e-2 # cm
+    dY = (2 + 1/16) * 2.54 * 1e-2 # cm
+    d = (3 + 7/8) * 2.54 * 1e-2 # cm
+    frequency_d = 343 / (3 * d)
+    frequency_Z = 343 / (3 * dZ)
+    frequency_Y = 343 / (3 * dY)
+    # print("Element Veritcal spacing (m):", dZ)
+    # print("Element Horizontal spacing (m):", dY)
+    # print("Design frequency (Hz):", np.round(frequency_d, 2), np.round(frequency_Z, 2), np.round(frequency_Y, 2))
 
-    # hexagonal spacing
-    X, Y, Z = generate_hex_array(num_elements=61, d=d, max_angle=1.0)
+    # Array Element Numbering (based on teensy prototype):
+    # 8  7  T  1  2
+    # 10 9  T  3  4
+    # 12 11 T  5  6
+
+    X = np.zeros(12)
+    Y = np.array([d/2, d/2 + dY, d/2, d/2 + dY, d/2, d/2 + dY, -d/2, -d/2 - dY, -d/2, -d/2 - dY, -d/2, -d/2 - dY])
+    Z = np.array([dZ, dZ, 0, 0, -dZ, -dZ, dZ, dZ, 0, 0, -dZ, -dZ])
+
+    # # rectangular spacing
+    # num_elements_per_dim = 4
+    # y, z = np.meshgrid(np.linspace(-2*d, 2*d, num_elements_per_dim), np.linspace(-2*d, 2*d, num_elements_per_dim))
+    # X = np.zeros(num_elements_per_dim**2)
+    # Y = np.ravel(y)
+    # Z = np.ravel(z)
+
+    # # hexagonal spacing
+    # X, Y, Z, eX, eY, eZ = generate_hex_array(num_elements=13, d=d, max_angle=45.0)
 
     bf_array = BeamformingArray(X=X,
                                 Y=Y,
                                 Z=Z,
-                                design_frequency=frequency,
+                                design_frequency=frequency_Y,
                                 element_directivity=ElementDirectivity.DIPOLE)
+    
+    # bf_array.plot_array_geometry()
     
     bf_model = BeamformingModel(bf_array)
 
     plotter = BeamformingPlot(bf_model)
 
-    az, de, beampattern_orig = bf_model.compute_beampattern(frequency, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='raised_cosine')
+    az, de, beampattern_orig = bf_model.compute_beampattern(frequency_Y, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='uniform')
     # plotter.plot_beampattern_image(az, de, B_p)
 
-    # create target beampattern with rectangular main lobe
-    # extend the main lobe to be +/- 10 degrees in azimuth and elevation
-    az = np.radians(np.arange(-180, 180, 1))
-    de = np.radians(np.arange(-90, 90, 1))
-    AZ, DE = np.meshgrid(az, de, indexing='ij')
-    # make a mask with a null at the center and a rectangular main lobe around it
-    mask = (np.abs(np.degrees(DE)) <= 25) # rectangular main lobe with width and height of 20 degrees
-    secondary_mask = (np.abs(np.degrees(DE)) <= 10) & (np.abs(np.degrees(DE)) <= 20) # secondary rectangular lobe with width and height of 40 degrees
-    B_p = np.zeros_like(AZ, dtype = np.complex64) + (1e-12 + 0j)
-    B_p[mask] = 1 + 0j
-    B_p[secondary_mask] = 1e-12 + 0j
+    # get main lobe null width from original beam pattern
+    de_zero_ind = np.where(de == 0)[0][0]
+    min_func = 10 * np.log10(np.abs(beampattern_orig)/np.max(np.abs(beampattern_orig)))
+    right_min = np.argmin(min_func[:, de_zero_ind:-2], axis = 1) + de_zero_ind
+    left_min = np.argmin(min_func[:, 2:de_zero_ind], axis = 1)
 
-    w_opt, cost, message = bf_model.least_squares_beamforming_weights(az, de, B_p)
+    B_p = beampattern_orig.copy()
+    for i in range(len(az)):
+        B_p[i, right_min[i]:] = 1e-12 + 0j
+        B_p[i, :left_min[i]+1] = 1e-12 + 0j
 
-    print("Final cost:", cost)
-    print("Optimization message:", message)
-
-    az, de, beampattern = bf_model.compute_beampattern(frequency, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='custom', shading_vector=w_opt)
-    plotter.plot_beampattern_image(az, de, beampattern, method='polar')
-    plotter.plot_beampattern_image(az, de, B_p, method='polar')
-    # plotter.plot_beampattern_3d(az, de, B_p)
-
-    shading = ArrayShading(bf_array)
-    fig, ax = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
-    shading.plot_weights_on_elements(fig, ax, w_opt)
-
+    # plt.plot(min_func[45, :])
+    plotter.plot_beampattern_image(az, de, B_p, method = 'rectangular')
     plt.show()
+
+    # # create target beampattern with rectangular main lobe
+    # # extend the main lobe to be +/- 10 degrees in azimuth and elevation
+    # az = np.radians(np.arange(-180, 180, 1))
+    # de = np.radians(np.arange(-90, 90, 1))
+    # AZ, DE = np.meshgrid(az, de, indexing='ij')
+    
+    # # sloped lobe from 1 at center to -3 dB at 5 degrees
+    # B_p = -3/np.radians(5) * np.abs(DE)
+    # B_p = 10 ** (B_p / 10) + 0j # convert from dB to linear scale
+    # B_p[B_p < 0.5] = 1e-12 + 0j # set values below -3 dB to 0 for a sharper cutoff
+
+    # w_opt, cost, message = bf_model.least_squares_beamforming_weights(az, de, B_p)
+
+    # print("Final cost:", cost)
+    # print("Optimization message:", message)
+
+    # # az, de, beampattern = bf_model.compute_beampattern(frequency_Y, delta_az=1, delta_de=1, steer_az=np.array([[0]]), steer_de=np.array([[0]]), shading_method='custom', shading_vector=w_opt)
+    # plotter.plot_beampattern_image(az, de, beampattern_orig, method='rectangular')
+    # # plotter.plot_beampattern_image(az, de, B_p, method='polar')
+    # # plotter.plot_beampattern_3d(az, de, B_p)
+
+    # # shading = ArrayShading(bf_array)
+    # # fig, ax = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    # # shading.plot_weights_on_elements(fig, ax, w_opt)
+
+    # fig, ax = plt.subplots()
+    # plotter.plot_beampattern_slice(ax, az, de, beampattern_orig, slice_az=np.radians(90), label_text='Az Slice', style='cartesian')
+    # plotter.plot_beampattern_slice(ax, az, de, beampattern_orig, slice_az=np.radians(0), label_text='De Slice', style='cartesian')
+    # plt.show()
