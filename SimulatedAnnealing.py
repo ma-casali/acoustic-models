@@ -8,7 +8,8 @@ class SAOptimization:
     def __init__(
             self, 
             func: callable = None,
-            ndim: int = 2,
+            constraint_func: callable = None,
+            ndim: int = None,
             state_0: np.ndarray = None,
             state_lims: np.ndarray = None,
             state_inc: np.ndarray = None,
@@ -18,6 +19,8 @@ class SAOptimization:
         Docstring for __init__
         :param func: The function to be optimized. If None, the Rosenbrock function will be used.
         :type func: callable or None (default: None)
+        :param constraint_func: A function that takes a state as input and returns a boolean indicating whether the state satisfies the constraints of the optimization problem. If None, no constraints will be applied.
+        :type constraint_func: callable or None (default: None)
         :param ndim: The number of variables in the optimization problem.
         :type ndim: int (default: 4)
         :param state_0: np.ndarray of shape (ndim,) representing the initial state of the optimization. If None, a random state will be generated within the limits specified by state_lims.
@@ -30,11 +33,16 @@ class SAOptimization:
         # function related variables
         self.function_calls = 0
         self.function = func if func is not None else self.rosenbrock
+        self.constraint_func = constraint_func if constraint_func is not None else lambda x: True
 
         # state variables
         if ndim is None and state_0 is not None:
             self.ndim = state_0.shape[0]
             self.state = state_0
+            if state_lims is not None:
+                self.state_lims = state_lims
+            else:
+                self.state_lims = np.array([[-2]*self.ndim, [2]*self.ndim])
         elif state_0 is None and ndim is not None:
             self.ndim = ndim
             if state_lims is not None:
@@ -57,11 +65,10 @@ class SAOptimization:
         self.accepted_states = self.state[np.newaxis, :]
 
         # energy variables
-        self.energy = self.function(self.state)
+        self.energy = self.log_distortion(self.function(self.state))
         self.state_list[tuple(self.state)] = self.energy
         self.function_calls += 1
         self.energy_list = np.array([self.energy])
-        self.next_energy = 2 * self.energy
         self.accepted_energies = np.array([self.energy])
 
         # temperature variables
@@ -77,6 +84,7 @@ class SAOptimization:
         self.reanneal_limit = np.round(np.linalg.norm(self.state_space)**(np.sqrt(np.shape(self.state)[0]/(np.shape(self.state)[0]+1))))
         self.old_reanneal_limit = self.reanneal_limit.copy()
         self.r = [0]
+        self.function_calls_since_min = 0
 
         # tracking variables
         self.iter_since_reanneal = 0
@@ -90,6 +98,106 @@ class SAOptimization:
 
     def rosenbrock(self, x):
         return np.sum(100*(x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2, axis = 0)
+    
+    def get_copies(self, state = None):
+
+        # rotations: 0, 90, 180, 270 degrees
+        # reflections: identity, x-axis
+        # translations: as allowed by state_lims and state_inc
+
+        if state is None:
+            state = self.state
+
+        X = state[:12]
+        Y = state[12:]
+        coords = np.column_stack((X, Y))
+
+        X_lims = self.state_lims[:, 0] # shape (2,)
+        Y_lims = self.state_lims[:, 1] # shape (2,)
+
+        dx = self.state_inc[0]
+        dy = self.state_inc[1]
+
+        nX_max = np.diff(X_lims)//dx
+        mY_max = np.diff(Y_lims)//dy
+
+        # 4 rotations, 2 reflections, (n_max * m_max) translations
+        theta = np.array([0, np.pi/2, np.pi, 3*np.pi/2])
+        refl = np.array([[1, 1], [-1, 1]])
+        copies = np.empty((2, 4, int(nX_max), int(mY_max), len(X), 2))
+        copies.fill(np.nan)
+        for i1 in range(copies.shape[0]):
+            r = refl[i1]
+            for i2 in range(copies.shape[1]):
+                th = theta[i2]
+                rot_matrix = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+                
+                # rotated and reflected coordinates
+                coords_rot = np.round(coords @ rot_matrix * r, decimals = 5)
+                x_min = np.min(coords_rot[:, 0])
+                y_min = np.min(coords_rot[:, 1])
+
+                # translate so that min x,y is at the bottom left corner of the bounds
+                coords_rot = coords_rot - np.array([x_min, y_min]) + np.array([X_lims[0], Y_lims[0]])
+                curr_w = np.max(coords_rot[:, 0]) - np.min(coords_rot[:, 0])
+                curr_h = np.max(coords_rot[:, 1]) - np.min(coords_rot[:, 1])
+                n_steps = int(np.floor((X_lims[1] - X_lims[0] - curr_w)// dx)) + 1
+                m_steps = int(np.floor((Y_lims[1] - Y_lims[0] - curr_h)// dy)) + 1
+
+                for iN in range(n_steps):
+                    for iM in range(m_steps):
+                        delta_x = iN*dx
+                        delta_y = iM*dy
+
+                        coords_copy = coords_rot + np.array([delta_x, delta_y])
+                        if np.all(coords_copy[:, 0] >= X_lims[0]) and np.all(coords_copy[:, 0] <= X_lims[1]) and np.all(coords_copy[:, 1] >= Y_lims[0]) and np.all(coords_copy[:, 1] <= Y_lims[1]):
+                            idx = np.lexsort((coords_copy[:,1], coords_copy[:,0]))
+                            copies[i1, i2, iN, iM] = coords_copy[idx]
+                        else:
+                            copies[i1, i2, iN, iM] = np.nan
+
+        copies = copies.reshape(-1, len(X), 2)
+        copies = copies[~np.isnan(copies).any(axis=(1,2))]
+        copies = np.unique(copies, axis = 0)
+
+        return copies
+    
+    def get_canonical_key(self, state):
+
+        # state need not be lexicographically sorted
+        coords = state.reshape(-1, 2)
+
+        transforms = [
+            [[1, 0], [0, 1]], # identity
+            [[0, -1], [1, 0]], # rotate 90
+            [[-1, 0], [0, -1]], # rotate 180
+            [[0, 1], [-1, 0]], # rotate 270
+            [[-1, 0], [0, 1]], # reflect across y-axis
+            [[1, 0], [0, -1]], # reflect across x-axis
+            [[0, 1], [1, 0]], # reflect across y=x
+            [[0, -1], [-1, 0]], # reflect across y=-x
+        ]
+
+        possible_versions = []
+        for mat in transforms:
+            c = coords @ np.array(mat)
+            c -= np.min(c, axis = 0) # translate so that min x,y is at the origin
+            c = np.lexsort((c[:,1], c[:,0])) # sort lexicographically
+            possible_versions.append(tuple(c.flatten()))
+
+        return min(possible_versions)
+
+    def handle_point_permutations(self, state):
+
+        # sort points in state by their angle from the origin, to handle permutations of identical points
+        X = state[:12]
+        Y = state[12:]
+        coords = np.column_stack((X, Y))
+        sorted_indices = np.lexsort((coords[:,1], coords[:,0]))
+        sorted_coords = coords[sorted_indices]
+        sorted_state = np.concatenate((sorted_coords[:,0], sorted_coords[:,1]))
+
+        return sorted_state
 
     def get_sensitivity(self, distortion_fun, fun, x, y, dx, x_list, lims):
 
@@ -107,7 +215,7 @@ class SAOptimization:
             else:
                 y_prime[i1] = distortion_fun(fun(x_prime[i1]))
 
-        return (y_prime - y)/(np.diagonal(x_prime) - x) * np.ceil(np.diff(lims, axis = 0))
+        return (y_prime - y)/(np.diagonal(x_prime) - x) * np.ceil(np.diff(lims, axis = 0).flatten())
 
     def log_distortion(self, x, beta = 0.5):
         """
@@ -115,13 +223,15 @@ class SAOptimization:
         function that compresses the range of energy values, with a parameter beta that controls the amount of 
         distortion.
         """
-        # return np.log(beta*x + 1)
-        return x
+        return np.log(beta*x + 1)
+        # return x
 
     def optimize(self):
 
         tqdm.tqdm.write('Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+' and initial energy: {:.3f}'.format(self.energy))
-        with tqdm.tqdm(total = self.reanneal_limit, desc = "Annealing") as pbar:
+        update_val_old = 0
+        num_vals_added = 0
+        with tqdm.tqdm(total = 100, desc = "Annealing") as pbar:
             while self.r[-1] < self.reanneal_limit:
 
                 # define new search parameters
@@ -161,15 +271,21 @@ class SAOptimization:
 
                     for i1 in range(np.shape(self.state)[0]):
                         state_candidate[i1] = np.random.choice(np.arange(self.state_lims[0,i1],self.state_lims[1,i1]+self.state_inc[i1],self.state_inc[i1]), p = state_distribution[i1]) 
+                    
                     # see if computation was already done
-                    if tuple(state_candidate) in self.state_list:
-                        energy_new = self.state_list[tuple(state_candidate)]
+                    key = self.get_canonical_key(state_candidate)
+                    if key in self.state_list:
+                        energy_new = self.state_list[key]
                     else:
-                        energy_new = self.log_distortion(self.rosenbrock(state_candidate))
-                        self.function_calls += 1
+                        if not self.constraint_func(state_candidate):
+                            continue_flag = False
+                            continue 
+                        else:
+                            energy_new = self.log_distortion(self.function(state_candidate))
+                            self.function_calls += 1
 
-                    self.state_list[tuple(state_candidate)] = energy_new
-                    self.energy_list = np.append(self.energy_list, [energy_new])
+                        self.state_list[key] = energy_new
+                        self.energy_list = np.append(self.energy_list, [energy_new])
 
                     # accept higher energies probabilistically 
                     if energy_new < self.energy:
@@ -184,7 +300,7 @@ class SAOptimization:
                     self.iter_since_reanneal = 0
                 else:
                     # exponentially increase k
-                    self.k = self.k + np.int64(2 * np.ones_like(self.k) * (self.iter_since_reanneal/self.reanneal_limit))
+                    self.k = self.k + np.int64(2 * (self.iter_since_reanneal/self.reanneal_limit))
                     self.energy = energy_new
                     self.state = state_candidate
                     self.iter_since_reanneal += 1
@@ -211,13 +327,16 @@ class SAOptimization:
                 # check history to see how many reanneals have occurred since global energy decrease
                 self.r = np.append(self.r, np.sum(self.reanneal_history[-(self.iter_since_energy_loss+1):] == 0))
 
-                pbar.update(self.r[-1] - self.r[-2])
-                pbar.set_postfix({
-                    "Energy": "{:.3f}".format(self.energy),
-                    "Best": "{:.3f}".format(self.global_min_energy),
-                    "k": "{:.3f}".format(self.k[0]),
-                    "reanneal_limit": "{:.1f}".format(self.reanneal_limit),
-                })
+                if self.iter_since_reanneal % 100 == 0:
+                    update_val_new = int(self.r[-1]/self.reanneal_limit*100)
+                    pbar.update(update_val_new - update_val_old)
+                    update_val_old = update_val_new
+                    pbar.set_postfix({
+                        "num_vals_added": "{:.0f}".format(num_vals_added),
+                        "Energy": "{:.3f}".format(self.energy),
+                        "Best": "{:.3f}".format(self.global_min_energy),
+                        "reanneal_limit": "{:.1f}".format(self.reanneal_limit),
+                    })
 
                 self.k_list = np.append(self.k_list, [self.k], axis = 0)
 
