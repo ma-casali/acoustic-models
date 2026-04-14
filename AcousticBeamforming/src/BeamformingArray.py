@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from enum import Enum
+import networkx as nx
+import scipy
+import cv2
 
 class ElementDirectivity(Enum):
     OMNI = 'omni'
@@ -101,3 +104,50 @@ class BeamformingArray:
         ax.set_xlim(min(np.min(self.X), -max_dim), max(np.max(self.X), max_dim))
         ax.set_ylim(min(np.min(self.Y), -max_dim), max(np.max(self.Y), max_dim))
         ax.set_zlim(min(np.min(self.Z), -max_dim), max(np.max(self.Z), max_dim))
+
+    def plot_array_connections(self, fig = None, ax = None):
+
+        if fig is None or ax is None:
+            fig, ax = plt.subplots()
+
+        f = 3 * np.logspace(2, 3, num = 10) # generic frequencies (used in optimization)
+        lam = 343 / f
+        spacing = lam / 2 # half wavelength max. spacing for each frequency
+
+        points = np.column_stack((self.Y, self.Z)) # shape (num_elements, 3)
+        tree = scipy.spatial.cKDTree(points)
+
+        cmap = plt.get_cmap('turbo')
+        cmap_vals = cmap(np.linspace(0, 1, len(self.X)))
+        for n, d in enumerate(spacing):
+            pairs = tree.query_pairs(r = d)
+            filtered_pairs = set()
+            for (i, j) in pairs:
+                dist = np.linalg.norm(points[i] - points[j])
+                # only show connections that are at least 1/5 of the wavelength apart to avoid apertures that are too small compared to a wavelength
+                if dist >= lam[n] / 5: 
+                    filtered_pairs.add((i, j))
+
+            G = nx.Graph()
+            G.add_nodes_from(range(len(self.X)))
+            G.add_edges_from(filtered_pairs)
+            components = list(nx.connected_components(G))
+            max_ind = np.argmax([len(c) for c in components])
+            connected_points = points[list(components[max_ind])]
+            connected_points = np.array(connected_points, dtype=np.float32)
+            
+            rect = cv2.minAreaRect(connected_points)
+            print(f"Frequency: {f[n]:.0f} Hz, Connected Sensors: {components[max_ind]}, Aperture Width, Height / lambda: {rect[1][0]/lam[n]:.2f}, {rect[1][1]/lam[n]:.2f}")
+
+            iter = 0
+            for (i, j) in filtered_pairs:
+                if iter == 0:
+                    # no alpha used, so that only the shortest connection is shown
+                    ax.plot([points[i, 0], points[j, 0]], [points[i, 1], points[j, 1]], color=cmap_vals[n, :], label = f'{f[n]:.0f} Hz spacing: {len(connected_points)}')
+                else:
+                    ax.plot([points[i, 0], points[j, 0]], [points[i, 1], points[j, 1]], color=cmap_vals[n, :])
+                   
+                iter += 1
+
+        ax.scatter(self.Y, self.Z, c = 'k', marker = 'o')
+        ax.legend()
