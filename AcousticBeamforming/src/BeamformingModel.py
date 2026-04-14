@@ -80,10 +80,11 @@ class BeamformingModel:
     def __init__(self, array: BeamformingArray):
         self.array = array
         self.shading_model = ArrayShading(array)
+        self.c = 343 # speed of sound in m/s
 
     def compute_steering_vector(self, steer_az: np.ndarray, steer_de: np.ndarray, frequency: float) -> np.ndarray:
 
-        c = 343 # speed of sound in m/s
+        c = self.c # speed of sound in m/s
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
@@ -205,7 +206,25 @@ class BeamformingModel:
         #   b. Measure across elements of the array: middle, and two radially extreme elements
 
         # Far-field approximation is broken when 
-    
+
+    def create_primary_filter(self, P: int = 5):
+
+        """
+        Primary filters applied to the array in the case of Frequency Invariant (FI) beamforming.
+        P is the aperture per frequency in half-wavelengths, or the number of active elements per frequency
+        """
+
+        # use the multi-rate method from Ward et al. (1996)
+        # x_n = P * lam_i / 2
+        primary_filter = []
+        for ele in range(len(self.array.X)):
+            x_n = np.sqrt(self.array.X[ele]**2 + self.array.Y[ele]**2 + self.array.Z[ele]**2)
+            cutoff_freq = P * self.c / (2 * x_n)
+            sos = scipy.signal.butter(N = 4, Wn = cutoff_freq, btype = 'lowpass', output = 'sos')
+            primary_filter.append(sos)
+
+        return primary_filter
+
     def least_squares_beamforming_weights(self, az: np.ndarray, de: np.ndarray, B_p: np.ndarray, frequency: float = None) -> np.ndarray:
         """For a given beampattern, compute the least squares beamforming weights that would produce that beampattern."""
 
@@ -282,7 +301,7 @@ class BeamformingModel:
         az, de, bp = self.compute_beampattern(frequency = frequency, shading_method='uniform')
 
         bp_norm = np.abs(bp) / np.max(np.abs(bp))
-        sum_over_sphere = np.sum(np.sum(bp_norm * np.cos(de[np.newaxis, :]), axis = 1) * (de[1] - de[0]))*(az[1] - az[0]) # approximate integral over the sphere using the trapezoidal rule, with cos(de) weighting for the spherical coordinates
+        sum_over_sphere = np.sum(np.sum(bp_norm * np.sin(de[np.newaxis, :]), axis = 1) * (de[1] - de[0]))*(az[1] - az[0]) # approximate integral over the sphere using the trapezoidal rule, with cos(de) weighting for the spherical coordinates
         directivity = bp_norm[az == 0, de == 0] / (sum_over_sphere / (2 * np.pi))
         DI = 10 * np.log10(directivity[0])
 
@@ -444,6 +463,9 @@ class BeamformingPlot:
 
     def plot_beampattern_slice(self, ax, az, de, beampattern, slice_az = None, slice_de = None, label_text: str = '', style: str = 'polar'):
         
+        """
+        The slice is on a line with slope equivalent to the tangent of the slice angle in azimuth.
+        """
         assert (slice_az is not None) or (slice_de is not None), "Either slice_az or slice_de must be provided"
         assert (style in ['polar', 'cartesian']), "Style must be either 'polar' or 'cartesian'"
 
@@ -452,15 +474,18 @@ class BeamformingPlot:
             beampattern_dB = 10 * np.log10(beampattern) # convert to dB scale\
 
         if slice_az is not None:
+            complimentary_az = np.radians(180) - (slice_az + np.radians(180)) % np.radians(360)
+            beampattern_plot = np.concatenate((beampattern_dB[az == slice_az, :].T, np.flip(beampattern_dB[az == complimentary_az, 1:].T, axis=0)), axis = 0).flatten()
+            de_plot = np.concatenate((de, -np.flip(de[1:])), axis = 0)
             if style == 'polar':
-                ax.plot(de, beampattern_dB[az == slice_az, :].T, label=label_text)
+                ax.plot(de_plot, beampattern_plot, label=label_text)
                 ax.set_rmax(0)
                 ax.set_rmin(-25)
                 ax.set_rticks([])
                 ax.grid(False)
             else:   
-                ax.plot(np.degrees(de), beampattern_dB[az == slice_az, :].T, label=label_text)
-                ax.set_xlabel('Azimuth (degrees)')
+                ax.plot(np.degrees(de_plot), beampattern_plot, label=label_text)
+                ax.set_xlabel('Elevation (degrees)')
                 ax.set_ylim(-25, 0)
                 ax.set_ylabel('Beamforming Gain (dB)')
                 ax.grid()
@@ -510,66 +535,40 @@ class BeamformingPlot:
         ax.set_ylim(-50, 50)
         ax.set_zlim(-50, 50)
         ax.grid()
+        
 
 #region Example runs
 if __name__ == "__main__":
 
-    # def chord_distance(x, a, b, c, theta_1, d):
-    #     r1 = a + b * theta_1**(1/c)
-    #     r2 = a + b * x**(1/c)
-    #     return d - np.sqrt(r1**2 + r2**2 - 2*r1*r2*np.cos(x - theta_1))
-    
-    f = 3*np.logspace(2, 3, num = 12)
-    # f = np.flip(f)
-    # d_target = 343 / (f * 2) # half wavelength distance for each frequency
-
-    # a = 0
-    # c = 2
-    # b = d_target[0] / ((np.pi/4) ** (1/c))
-    # theta_1 = 0
-
-    # X = np.zeros(12)
-    # Y = np.zeros(12)
-    # Z = np.zeros(12)
-    # for i in range(1,12):
-    #     if i == 1:
-    #         r1 = a
-    #         initial_guess = np.pi / 2
-    #     else:
-    #         r1 = a + b * theta_1**2
-    #         initial_guess = theta_1 + d_target[i-1] / r1
-
-    #     theta_2_solution = scipy.optimize.fsolve(chord_distance, initial_guess, args=(a, b, c, theta_1, d_target[i]))
-    #     theta_2 = theta_2_solution[0]
-    #     theta_1 = theta_2
-
-    #     Y[i] = (a + b * theta_2**(1/c)) * np.cos(theta_2)
-    #     Z[i] = (a + b * theta_2**(1/c)) * np.sin(theta_2)
-
     # random point search
-    X = np.zeros(12)
-    Y = np.array([ 0.35, 0.47, 0.12, 0.2, 0.28, 0.16, 0.17, 0.17, 0.43, -0.01, 0.21, 0.05])
-    Z = np.array([0.30, 0.60, -.16, -.30, 0.00,  .71,  -.19, -.10, .87, -.17, .15, -.16])
+    X = np.zeros(16)
+    Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
+    Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
 
     # # spiral search
-    X = np.zeros(12)
-    Y = np.array([-0.04, 0.58, 0.39, 0.83, 0.37, 0.12, 0.37, 0.28, 0.18, 0.11, -0.1, 0.25])
-    Z = np.array([-0.78, 0.06, -0.11, 0.35, -0.19, -0.77, -0.37, -0.61, -0.69, -0.75, -0.87, -0.41])
+    # X = np.zeros(16)
+    # Y = np.array([np.float64(0.0), np.float64(-0.05), np.float64(-0.02), np.float64(-0.21), np.float64(0.1), np.float64(0.2), np.float64(-0.19), np.float64(-0.34), np.float64(-0.31), np.float64(0.16), np.float64(0.58), np.float64(0.63), np.float64(0.77), np.float64(0.74), np.float64(1.29), np.float64(1.2)])
+    # Z = np.array([np.float64(0.0), np.float64(-0.03), np.float64(0.02), np.float64(0.11), np.float64(0.26), np.float64(0.4), np.float64(0.83), np.float64(0.69), np.float64(1.0), np.float64(1.28), np.float64(1.45), np.float64(1.41), np.float64(1.56), np.float64(1.41), np.float64(1.46), np.float64(1.31)])
 
     array = BeamformingArray(X, Y, Z, design_frequency=3e3, element_directivity=ElementDirectivity.DIPOLE)
     bf_model = BeamformingModel(array)
     plotter = BeamformingPlot(bf_model)
 
     fig, ax = plt.subplots()
+    fig2, ax2 = plt.subplots()
 
+    f = 3 * np.logspace(2, 3, num = 10)
     for freq in f:
         DI, array_gain = bf_model.get_beamforming_performance_measures(frequency=freq)
         print(f"DI, AG @ {freq:.0f} Hz: {DI:.2f}, {array_gain:.2f}")
         az, de, bp = bf_model.compute_beampattern(frequency=freq, shading_method='uniform')
-        plotter.plot_beampattern_slice(ax, az, de, bp, slice_az = 0, label_text = f'{freq:.0f} Hz', style = 'cartesian')
+        plotter.plot_beampattern_slice(ax, az, de, bp, slice_az = np.radians(90), label_text = f'{freq:.0f} Hz', style = 'cartesian')
+        plotter.plot_beampattern_slice(ax2, az, de, bp, slice_az = np.radians(0), label_text = f'{freq:.0f} Hz', style = 'cartesian')
     ax.legend()
+
+    fig, ax = plt.subplots()
     
-    array.plot_array_geometry()
+    array.plot_array_connections(fig, ax)
     # theta_fine = np.arange(0, theta_2, 0.01)
     # r_fine = a + b * theta_fine**(1/c)
 

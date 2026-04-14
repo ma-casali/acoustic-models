@@ -99,69 +99,6 @@ class SAOptimization:
     def rosenbrock(self, x):
         return np.sum(100*(x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2, axis = 0)
     
-    def get_copies(self, state = None):
-
-        # rotations: 0, 90, 180, 270 degrees
-        # reflections: identity, x-axis
-        # translations: as allowed by state_lims and state_inc
-
-        if state is None:
-            state = self.state
-
-        X = state[:12]
-        Y = state[12:]
-        coords = np.column_stack((X, Y))
-
-        X_lims = self.state_lims[:, 0] # shape (2,)
-        Y_lims = self.state_lims[:, 1] # shape (2,)
-
-        dx = self.state_inc[0]
-        dy = self.state_inc[1]
-
-        nX_max = np.diff(X_lims)//dx
-        mY_max = np.diff(Y_lims)//dy
-
-        # 4 rotations, 2 reflections, (n_max * m_max) translations
-        theta = np.array([0, np.pi/2, np.pi, 3*np.pi/2])
-        refl = np.array([[1, 1], [-1, 1]])
-        copies = np.empty((2, 4, int(nX_max), int(mY_max), len(X), 2))
-        copies.fill(np.nan)
-        for i1 in range(copies.shape[0]):
-            r = refl[i1]
-            for i2 in range(copies.shape[1]):
-                th = theta[i2]
-                rot_matrix = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
-                
-                # rotated and reflected coordinates
-                coords_rot = np.round(coords @ rot_matrix * r, decimals = 5)
-                x_min = np.min(coords_rot[:, 0])
-                y_min = np.min(coords_rot[:, 1])
-
-                # translate so that min x,y is at the bottom left corner of the bounds
-                coords_rot = coords_rot - np.array([x_min, y_min]) + np.array([X_lims[0], Y_lims[0]])
-                curr_w = np.max(coords_rot[:, 0]) - np.min(coords_rot[:, 0])
-                curr_h = np.max(coords_rot[:, 1]) - np.min(coords_rot[:, 1])
-                n_steps = int(np.floor((X_lims[1] - X_lims[0] - curr_w)// dx)) + 1
-                m_steps = int(np.floor((Y_lims[1] - Y_lims[0] - curr_h)// dy)) + 1
-
-                for iN in range(n_steps):
-                    for iM in range(m_steps):
-                        delta_x = iN*dx
-                        delta_y = iM*dy
-
-                        coords_copy = coords_rot + np.array([delta_x, delta_y])
-                        if np.all(coords_copy[:, 0] >= X_lims[0]) and np.all(coords_copy[:, 0] <= X_lims[1]) and np.all(coords_copy[:, 1] >= Y_lims[0]) and np.all(coords_copy[:, 1] <= Y_lims[1]):
-                            idx = np.lexsort((coords_copy[:,1], coords_copy[:,0]))
-                            copies[i1, i2, iN, iM] = coords_copy[idx]
-                        else:
-                            copies[i1, i2, iN, iM] = np.nan
-
-        copies = copies.reshape(-1, len(X), 2)
-        copies = copies[~np.isnan(copies).any(axis=(1,2))]
-        copies = np.unique(copies, axis = 0)
-
-        return copies
-    
     def get_canonical_key(self, state):
 
         # state need not be lexicographically sorted
@@ -187,18 +124,6 @@ class SAOptimization:
 
         return min(possible_versions)
 
-    def handle_point_permutations(self, state):
-
-        # sort points in state by their angle from the origin, to handle permutations of identical points
-        X = state[:12]
-        Y = state[12:]
-        coords = np.column_stack((X, Y))
-        sorted_indices = np.lexsort((coords[:,1], coords[:,0]))
-        sorted_coords = coords[sorted_indices]
-        sorted_state = np.concatenate((sorted_coords[:,0], sorted_coords[:,1]))
-
-        return sorted_state
-
     def get_sensitivity(self, distortion_fun, fun, x, y, dx, x_list, lims):
 
         """
@@ -223,8 +148,8 @@ class SAOptimization:
         function that compresses the range of energy values, with a parameter beta that controls the amount of 
         distortion.
         """
-        return np.log(beta*x + 1)
-        # return x
+        # return np.log(beta*x + 1)
+        return x
 
     def optimize(self):
 
