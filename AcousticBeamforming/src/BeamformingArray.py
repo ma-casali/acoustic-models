@@ -47,23 +47,30 @@ class BeamformingArray:
             assert np.isclose(np.dot(self.eX[i], self.eZ[i]), 0), "eX and eZ are not orthogonal for element {}".format(i)
             assert np.isclose(np.dot(self.eY[i], self.eZ[i]), 0), "eY and eZ are not orthogonal for element {}".format(i)
 
-    def compute_element_directivity(self, AZ, DE, custom_directivity_function=None):
+    def compute_element_directivity(self, AZ, DE, custom_directivity_function=None, element_mask: np.ndarray = None):
         # computes the directivity of the element at the angles specified by AZ and DE (in radians)
         # This is assumed to be in the far-field so that: 
         #   - R (distance from source to element) >> array size 
         #   - AZ and DE are ~= the angles of the incoming wave relative to the element's local coordinate system (eX, eY, eZ)
         # returns an array of shape (len(AZ), len(DE), num_elements) containing the directivity values for each angle
 
+        if element_mask is None:
+            element_mask = np.ones(len(self.X), dtype=bool)
+        else:
+            if len(element_mask) != len(self.X):
+                raise ValueError("element_mask must have the same length as the number of elements in the array")
+            element_mask = np.array(element_mask, dtype=bool)
+
         if len(AZ.shape) == 2:
             DE = DE[:, :, np.newaxis] # shape (len(AZ), len(DE), 1)
             AZ = AZ[:, :, np.newaxis] # shape (len(AZ), len(DE), 1)
-            element_de = self.element_de[np.newaxis, np.newaxis, :] # shape (1, 1, num_elements)
-            element_az = self.element_az[np.newaxis, np.newaxis, :] # shape (1, 1, num_elements)
+            element_de = self.element_de[np.newaxis, np.newaxis, element_mask] # shape (1, 1, num_elements)
+            element_az = self.element_az[np.newaxis, np.newaxis, element_mask] # shape (1, 1, num_elements)
         elif len(AZ.shape) == 1:
             DE = DE[:, np.newaxis] # shape (len(DE), 1)
             AZ = AZ[:, np.newaxis] # shape (len(AZ), 1)
-            element_de = self.element_de[np.newaxis, :] # shape (1, num_elements)
-            element_az = self.element_az[np.newaxis, :] # shape (1, num_elements)
+            element_de = self.element_de[np.newaxis, element_mask] # shape (1, num_elements)
+            element_az = self.element_az[np.newaxis, element_mask] # shape (1, num_elements)
         else:
             raise ValueError("AZ and DE must be either 1D or 2D arrays")
         
