@@ -2,6 +2,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
+import scipy
 
 class SAOptimization:
 
@@ -13,6 +14,8 @@ class SAOptimization:
             state_0: np.ndarray = None,
             state_lims: np.ndarray = None,
             state_inc: np.ndarray = None,
+            search_scaling: np.ndarray = None,
+            max_calls: int = None
     ):
         
         """
@@ -29,6 +32,9 @@ class SAOptimization:
         :type state_lims: np.ndarray or None (default: None)
         :param state_inc: np.ndarray of shape (ndim,) representing the increment for each dimension when generating candidate states. If None, the increment will be set to 0.01 for each dimension.
         """
+
+        # General rules of thumb: 
+        # 1. The search dimensions should always be at least 2-3 times larger than the state increment
         
         # function related variables
         self.function_calls = 0
@@ -63,6 +69,7 @@ class SAOptimization:
         self.state = np.int32(np.floor(self.state/self.state_inc))*self.state_inc # round initial state to nearest increment
         self.state_space = np.diff(self.state_lims, axis = 0)/self.state_inc
         self.accepted_states = self.state[np.newaxis, :]
+        self.search_scaling = search_scaling if search_scaling is not None else np.ones_like(self.state)
 
         # energy variables
         self.energy = self.log_distortion(self.function(self.state))
@@ -74,17 +81,40 @@ class SAOptimization:
         # temperature variables
         self.k = 2*np.ones_like(self.state) # initial k
         self.k_list = np.array([self.k])
-        self.temperature_0 = 0.5*np.ones_like(self.state) # initial temperature
+
+        # - generate a starting temperature
+        deltas = []
+        for _ in range(20):
+            test_state = self.state + np.random.uniform(-self.state_inc, self.state_inc, size = self.state.shape)
+            test_state = np.clip(test_state, self.state_lims[0], self.state_lims[1])
+            test_energy = self.log_distortion(self.function(test_state))
+
+            if test_energy > self.energy:
+                deltas.append(test_energy - self.energy)
+            self.function_calls += 1
+
+        if len(deltas) > 0:
+            avg_delta = np.mean(deltas)
+            t0_val = -avg_delta/np.log(0.99) # set initial temperature so that worse solutions are accepted with probability 99%
+        else:
+            t0_val = 1.0
+        print(f"Initial temperature set to {t0_val:.3f} based on average energy increase of {avg_delta:.3f} from random perturbations around initial state")
+
+        self.temperature_0 = t0_val * np.ones_like(self.state) # initial temperature
+        
+        # - other temperature-related variables
         self.temperature = self.temperature_0.copy()
         self.temperature_history = np.array([self.temperature])
-        self.sensitivity = self.get_sensitivity(self.log_distortion, self.rosenbrock, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
+        self.sensitivity = self.get_sensitivity(self.log_distortion, self.function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
         self.function_calls += 1
 
         # meta-parameters
-        self.reanneal_limit = np.round(np.linalg.norm(self.state_space)**(np.sqrt(np.shape(self.state)[0]/(np.shape(self.state)[0]+1))))
-        self.old_reanneal_limit = self.reanneal_limit.copy()
+        # self.reanneal_limit = np.round(np.linalg.norm(self.state_space)**(np.sqrt(np.shape(self.state)[0]/(np.shape(self.state)[0]+1))))
+        self.reanneal_limit = 10 * self.ndim
         self.r = [0]
         self.function_calls_since_min = 0
+        self.momentum_scaling = 1.0
+        self.momentum = np.zeros_like(self.state)
 
         # tracking variables
         self.iter_since_reanneal = 0
@@ -94,40 +124,16 @@ class SAOptimization:
         self.global_min_energy = self.energy
         self.global_min_state = self.state
         self.search_list = np.array(self.state_space * self.state_inc)
+        self.max_calls = max_calls if max_calls is not None else np.inf
 
 
     def rosenbrock(self, x):
         return np.sum(100*(x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2, axis = 0)
-    
-    def get_canonical_key(self, state):
-
-        # state need not be lexicographically sorted
-        coords = state.reshape(-1, 2)
-
-        transforms = [
-            [[1, 0], [0, 1]], # identity
-            [[0, -1], [1, 0]], # rotate 90
-            [[-1, 0], [0, -1]], # rotate 180
-            [[0, 1], [-1, 0]], # rotate 270
-            [[-1, 0], [0, 1]], # reflect across y-axis
-            [[1, 0], [0, -1]], # reflect across x-axis
-            [[0, 1], [1, 0]], # reflect across y=x
-            [[0, -1], [-1, 0]], # reflect across y=-x
-        ]
-
-        possible_versions = []
-        for mat in transforms:
-            c = coords @ np.array(mat)
-            c -= np.min(c, axis = 0) # translate so that min x,y is at the origin
-            c = np.lexsort((c[:,1], c[:,0])) # sort lexicographically
-            possible_versions.append(tuple(c.flatten()))
-
-        return min(possible_versions)
 
     def get_sensitivity(self, distortion_fun, fun, x, y, dx, x_list, lims):
 
         """
-        Calculates the direction of the graident of the energy function using a finite difference approximation,
+        Calculates the direction of the gradient of the energy function using a finite difference approximation,
         with distortion applied to the energy values to smooth the landscape and make it easier to optimize.
         """
 
@@ -155,52 +161,60 @@ class SAOptimization:
 
         tqdm.tqdm.write('Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+' and initial energy: {:.3f}'.format(self.energy))
         update_val_old = 0
-        num_vals_added = 0
+        proposed_states = 0
+        accepted_states = 0
+        used_previous_found = 0
         with tqdm.tqdm(total = 100, desc = "Annealing") as pbar:
-            while self.r[-1] < self.reanneal_limit:
+            while self.r[-1] < 5 * self.ndim and self.function_calls < self.max_calls:
 
-                # define new search parameters
+                # calculate momentum, the measure of how much the state is changing
+                # this will generally tell you how the algorithm is trending towards a minimum and in what direction
+                # momentum exists on a scale of 
                 if len(self.accepted_energies) >= 2:
-                    delta_state = np.diff(self.accepted_states[-2:,:], axis = 0)
-                    if np.linalg.norm(delta_state) < np.min(self.state_inc):
-                        momentum = np.zeros_like(self.state)
-                    else:
-                        momentum = np.diff(self.accepted_energies[-2:])/np.diff(self.accepted_states[-2:,:], axis = 0)
-                        momentum[np.isnan(momentum)] = 0
-                        momentum[np.isinf(momentum)] = 0
+                    delta_state = np.diff(self.accepted_states[-2:,:], axis = 0).flatten()
+                    self.momentum[delta_state != 0] += np.diff(self.accepted_energies[-2:])/delta_state[delta_state != 0]
+                    self.momentum[delta_state == 0] += 0
                 else:
-                    momentum = np.zeros_like(self.state)
-                momentum = 2 - (1.5*np.exp(1))*np.exp(-(1+np.abs(momentum)))
+                    self.momentum += np.zeros_like(self.state)
                 
                 self.temperature = self.temperature_0 / (np.log(1 + self.k)) # new temperature
                 
-                search_dimensions = np.abs(momentum) * (np.round(self.state_space*(self.temperature/self.temperature_0)/2) * self.state_inc)
-                search_dimensions = np.clip(search_dimensions, self.state_inc, self.state_space*self.state_inc)
+                gamma = 0.5
+                temp_ratio = (self.temperature/self.temperature_0) ** gamma
+                search_dimensions = np.round(self.state_space * temp_ratio * self.search_scaling) * self.state_inc
+                search_dimensions = np.clip(search_dimensions, self.state_inc * 3, self.state_space*self.state_inc)
                 self.search_list = np.append(self.search_list, search_dimensions, axis = 0)
-
-                state_distribution = []
-                for i1 in range(self.ndim):
-                    state_pdf = 1/(np.sqrt(2*np.pi*search_dimensions[0,i1]**2)) * np.exp(-(np.arange(self.state_lims[0,i1],self.state_lims[1,i1]+self.state_inc[i1],self.state_inc[i1]) - self.state[i1])**2/(2*search_dimensions[0,i1]**2))
-                    state_pdf /= np.sum(state_pdf)
-                    state_distribution.append(state_pdf)
-                
-                available_state_space = search_dimensions / self.state_inc
-                self.reanneal_limit = np.round(np.linalg.norm(available_state_space)**(np.sqrt(np.shape(self.state)[0]/(np.shape(self.state)[0]+1))))
 
                 # attempt to land on a new state 
                 continue_flag = False
-                iter = 0
                 state_candidate = np.zeros_like(self.state, dtype = np.float64)
+                iter = 0
                 while not continue_flag and iter < self.reanneal_limit:
                     iter += 1
 
                     for i1 in range(np.shape(self.state)[0]):
-                        state_candidate[i1] = np.random.choice(np.arange(self.state_lims[0,i1],self.state_lims[1,i1]+self.state_inc[i1],self.state_inc[i1]), p = state_distribution[i1]) 
-                    
+                        if self.momentum[i1] >= 100:
+                            alpha = 1 * self.momentum_scaling
+                        elif self.momentum[i1] <= -100:
+                            alpha = -1 * self.momentum_scaling
+                        else:
+                            alpha = (2/(1 + np.exp(-self.momentum[i1])) - 1) * self.momentum_scaling
+
+                        sigma = search_dimensions[0, i1]
+                        
+                        z = np.random.normal(0, 1)
+                        w = np.random.normal(0, 1)
+                        sample = alpha * abs(z) + w
+
+                        state_candidate[i1] = self.state[i1] + (sample * sigma)
+                        state_candidate[i1] = np.clip(state_candidate[i1], self.state_lims[0, i1], self.state_lims[1, i1])
+                        state_candidate[i1] = np.round(state_candidate[i1]/self.state_inc[i1])*self.state_inc[i1] # round to nearest increment
+
+                    key = tuple(state_candidate)
                     # see if computation was already done
-                    key = self.get_canonical_key(state_candidate)
                     if key in self.state_list:
                         energy_new = self.state_list[key]
+                        used_previous_found += 1
                     else:
                         if not self.constraint_func(state_candidate):
                             continue_flag = False
@@ -215,20 +229,30 @@ class SAOptimization:
                     # accept higher energies probabilistically 
                     if energy_new < self.energy:
                         continue_flag = True
-                    elif 1/(1 + np.exp((energy_new - self.energy)/np.max(self.temperature))) > np.random.uniform(0,1):
+                        accepted_states += 1
+                    elif min(1, np.exp((self.energy - energy_new)/np.max(self.temperature))) > np.random.uniform(0,1): # metropolis criterion
                         continue_flag = True
+                        accepted_states += 1
 
-                # if energy-search reach reanneal_limit, adjust anneal time variable k
-                if iter == self.reanneal_limit: # or self.iter_since_energy_loss >= self.reanneal_limit:
+                    proposed_states += 1
+
+                # if the number of accepted states has reached the reanneal limit, commence reannealing
+                if accepted_states == self.reanneal_limit or iter == self.reanneal_limit: 
                     # calculate new k using change in temperature and sensitivity
                     self.k = self.k/(1 + np.exp(self.sensitivity/np.linalg.norm(self.sensitivity)))
                     self.iter_since_reanneal = 0
+                    self.momentum_scaling = 1.0
+                    accepted_states = 0
                 else:
                     # exponentially increase k
-                    self.k = self.k + np.int64(2 * (self.iter_since_reanneal/self.reanneal_limit))
+                    if self.iter_since_energy_loss > (10 * self.ndim):
+                        self.k += self.ndim
+                    else:
+                        self.k = self.k + np.int64(2 * (self.iter_since_reanneal/self.reanneal_limit))
                     self.energy = energy_new
                     self.state = state_candidate
                     self.iter_since_reanneal += 1
+                    self.momentum_scaling *= 0.99
 
                 self.accepted_energies = np.append(self.accepted_energies, [self.energy])
                 self.temperature_history = np.append(self.temperature_history, [self.temperature], axis = 0)
@@ -240,7 +264,7 @@ class SAOptimization:
                     self.iter_since_energy_loss = 0
 
                     # calculate sensitivity using the directional gradient of energy
-                    self.sensitivity = self.get_sensitivity(self.log_distortion, self.rosenbrock, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)[0]
+                    self.sensitivity = self.get_sensitivity(self.log_distortion, self.function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)[0]
                     self.function_calls += 1
                     self.function_calls_since_min = self.function_calls
                 else:
@@ -252,22 +276,23 @@ class SAOptimization:
                 # check history to see how many reanneals have occurred since global energy decrease
                 self.r = np.append(self.r, np.sum(self.reanneal_history[-(self.iter_since_energy_loss+1):] == 0))
 
-                if self.iter_since_reanneal % 100 == 0:
-                    update_val_new = int(self.r[-1]/self.reanneal_limit*100)
-                    pbar.update(update_val_new - update_val_old)
-                    update_val_old = update_val_new
-                    pbar.set_postfix({
-                        "num_vals_added": "{:.0f}".format(num_vals_added),
-                        "Energy": "{:.3f}".format(self.energy),
-                        "Best": "{:.3f}".format(self.global_min_energy),
-                        "reanneal_limit": "{:.1f}".format(self.reanneal_limit),
-                    })
+                # if self.iter_since_reanneal % 100 == 0:
+                update_val_new = int(self.r[-1]/(5 * self.ndim)*100)
+                pbar.update(update_val_new - update_val_old)
+                update_val_old = update_val_new
+                pbar.set_postfix({
+                    "search_dim_d": "({:d}, {:d})".format(int(np.min(search_dimensions[0, :15])/self.state_inc[14]), int(np.max(search_dimensions[0, :15])/self.state_inc[14])),
+                    "search_dim_th": "({:d}, {:d})".format(int(np.min(search_dimensions[0, 15:])/self.state_inc[-1]), int(np.max(search_dimensions[0, 15:])/self.state_inc[-1])),
+                    "function_calls": "{:d}".format(self.function_calls),
+                    "Energy": "{:.2e}".format(self.energy),
+                    "Best": "{:.2e}".format(self.global_min_energy),
+                })
 
                 self.k_list = np.append(self.k_list, [self.k], axis = 0)
 
             tqdm.tqdm.write(f"Optimization Complete. Global Min: {self.global_min_energy:.3f}")
 
-        return self.global_min_state, self.global_min_energy
+        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, proposed_states
 
     def plot_results(self):
 
@@ -277,6 +302,7 @@ class SAOptimization:
         axs[0].set_xlabel('Iteration')
         axs[0].set_ylabel('Energy')
         axs[0].scatter(np.where(self.accepted_energies == self.global_min_energy)[0][0], self.global_min_energy, marker = 'x', c ='r')  
+        
         axs[1].plot(self.accepted_states)
         axs[1].grid(True)
         axs[1].set_xlabel('Iteration')
@@ -288,12 +314,39 @@ class SAOptimization:
         axs[2].set_ylabel('k-values')
 
         print('Function Calls: {:d} ({:d} extra)'.format(self.function_calls, self.function_calls - self.function_calls_since_min))
-        print('Reanneal Limit: {:d} --> {:d}'.format(np.int64(self.old_reanneal_limit), np.int64(self.reanneal_limit)))
         print('Global Min @ f('+', '.join('{:.3f}'.format(k) for k in self.global_min_state)+') = {:.3f}'.format(self.global_min_energy))
 
 if __name__ == "__main__":
 
-    sa_opt = SAOptimization(ndim = 2)
-    global_min_state, global_min_energy = sa_opt.optimize()
-    sa_opt.plot_results()
+    results = np.zeros((3, 5, 2))
+    for i in range(1,4):
+        for j in range(5):
+            opt = SAOptimization(ndim = 2**i, max_calls = 1e5)
+            global_min_state, global_min_energy, accepted_states, accepted_energies, proposed_states = opt.optimize()
+            results[i-1, j, 0] = global_min_energy
+            results[i-1, j, 1] = len(accepted_energies)/proposed_states
+
+            print(f"Accepted Energies: {len(accepted_energies)}, Proposed States: {proposed_states}, Acceptance Ratio: {len(accepted_energies)/proposed_states:.3f}")
+            print("\n")
+
+    print("Average optimized energy: ", np.mean(results[:, :, 0], axis = 1))
+    print("Average acceptance ratio: ", np.mean(results[:,:,1], axis = 1))
+
+    # fig, ax = plt.subplots()
+    # x = sa_opt.state_lims[0,0] + np.arange(0, (sa_opt.state_lims[1,0] - sa_opt.state_lims[0,0])/sa_opt.state_inc[0])*sa_opt.state_inc[0]
+    # y = sa_opt.state_lims[0,1] + np.arange(0, (sa_opt.state_lims[1,1] - sa_opt.state_lims[0,1])/sa_opt.state_inc[1])*sa_opt.state_inc[1]
+    # X, Y = np.meshgrid(x, y)
+    # Z = np.zeros_like(X)
+    # for i in range(X.shape[0]):
+    #     for j in range(X.shape[1]):
+    #         Z[i,j] = sa_opt.function(np.array([X[i,j], Y[i,j]]))
+    # ax.contourf(X, Y, Z, levels = 50, cmap = 'viridis')
+    # cmap = plt.get_cmap('turbo')
+    # cmap_vals = cmap(np.linspace(0, 1, len(accepted_states)))
+    # ax.scatter(accepted_states[:,0], accepted_states[:,1], c = cmap_vals, s = 5, alpha = 0.5)
+    # ax.scatter(global_min_state[0], global_min_state[1], marker = 'x', s = 100, c = 'w')  
+    # ax.set_xlabel('x')
+    # ax.set_ylabel('y')
+    # ax.set_title('Simulated Annealing Optimization Path')
+
     plt.show()

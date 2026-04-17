@@ -4,6 +4,9 @@ import scipy
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.animation import FuncAnimation
+import os
+from sklearn.neighbors import NearestNeighbors
+from matplotlib.animation import FuncAnimation
 from BeamformingArray import BeamformingArray, ElementDirectivity
 from ArrayShading import ArrayShading
 
@@ -88,7 +91,8 @@ class BeamformingModel:
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
-        element_positions = np.stack((self.array.X, self.array.Y, self.array.Z), axis=-1) # shape (num_elements, 3)
+        element_positions = np.stack([self.array.X, self.array.Y, self.array.Z], axis=1) # shape (num_elements, 3)
+
         directions = np.stack((np.cos(steer_de),
                               np.sin(steer_az) * np.sin(steer_de),
                               np.cos(steer_az) * np.sin(steer_de)), axis = -1) # shape (len(steer_az), len(steer_de), 3)
@@ -161,7 +165,7 @@ class BeamformingModel:
     
     def compute_beampattern(self, frequency, 
                             delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]),
-                            shading_method = 'uniform', shading_vector = None):
+                            shading_method = 'uniform', shading_vector = None, use_primary_filter = False):
         
         c = 343 # speed of sound in m/s
         wavelength = c / frequency
@@ -171,21 +175,27 @@ class BeamformingModel:
         de = np.radians(np.arange(0, 90, delta_de)) # degrees
         AZ, DE = np.meshgrid(az, de, indexing = 'ij')
 
+        if use_primary_filter:
+            cutoff_frequencies = self.compute_cutoff_frequencies() # shape (num_elements,)
+            element_mask = frequency < cutoff_frequencies
+        else:
+            element_mask = np.ones(len(self.array.X), dtype=bool)
+
         # compute vectors needed to compute the beampattern
-        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)
-        steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency) # shape (num_elements,)
+        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)[:, :, element_mask]
+        steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency)[:, :, element_mask] # shape (num_elements,)
         if shading_method == 'uniform':
-            shading_vector = np.ones(len(self.array.X)) # shape (num_elements,)
+            shading_vector = np.ones(len(self.array.X))[element_mask] # shape (num_elements,)
         elif shading_method == 'raised_cosine':
-            shading_vector = self.shading_model.compute_raised_cosine_window(p = 0.5, dims = [False, True, True]) # shape (num_elements,)
+            shading_vector = self.shading_model.compute_raised_cosine_window(p = 0.5, dims = [False, True, True])[element_mask] # shape (num_elements,)
         elif shading_method == 'kaiser':
             shading_vector = self.shading_model.compute_kaiser_window(beta = 3, dims = [False, True, True]) # shape (num_elements,)
         elif shading_method == 'custom':
             if (shading_vector == None).any():
                 raise ValueError("Custom shading vector must be provided when shading_method is 'custom'")
             else:
-                shading_vector = shading_vector
-                steering_vector = np.ones_like(steering_vector) # ignore the steering vector when using custom shading, since the custom shading can already include steering by having complex values
+                shading_vector = shading_vector[element_mask]
+                steering_vector = np.ones_like(steering_vector)[element_mask] # ignore the steering vector when using custom shading, since the custom shading can already include steering by having complex values
         else:
             raise ValueError("Invalid shading method. Must be one of 'uniform', 'raised_cosine', 'kaiser', or 'custom'.")
 
@@ -286,31 +296,68 @@ class BeamformingModel:
 
         return w_opt, res.cost, res.message
     
-    def get_beamforming_performance_measures(self, frequency: float = None) -> tuple[float, float, float]:
+    def compute_cutoff_frequencies(self):
+
+        """
+        Computation of cutoff frequencies for each element for a low-pass filter, based off distance to closest neighbor
+        """
+        coords = np.column_stack((self.array.X, self.array.Y, self.array.Z)) # shape (num_elements, 3)
+        nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
+        distances, _ = nbrs.kneighbors(coords)
+
+        if np.any(distances[:, 1] == 0):
+            raise ValueError("Two elements are in the same location, which will cause a division by zero in the cutoff frequency calculation. Please ensure all elements have unique positions.")
+
+        cutoff_frequencies = self.c / (2 * distances[:, 1]) # cutoff frequency is c / (2 * d), where d is the distance to the closest neighbor
+
+        return cutoff_frequencies
+    
+    def get_beamforming_performance_measures(self, delta_az = 0.25, delta_de = 0.25, frequency: float = None, use_primary_filter = False):
 
         """
         Computation of the following performance measusres for a given array:
         1. Directivity
-        2. Array gain vs. spatially white noise
-        3. Sensitivity and the tolerance factor
+        2. HPBW (min, mean, max across azimuth)
         """
 
         # 1. Directivity (B(0, 0) / 1/(4*pi) * integral of B(az, de) over the sphere)
         if frequency is None:
             frequency = self.array.design_frequency
-        az, de, bp = self.compute_beampattern(frequency = frequency, shading_method='uniform')
+        az, de, bp = self.compute_beampattern(frequency = frequency, delta_az=delta_az, delta_de=delta_de, shading_method='uniform', use_primary_filter=use_primary_filter) # shape (Az, De)
 
         bp_norm = np.abs(bp) / np.max(np.abs(bp))
         sum_over_sphere = np.sum(np.sum(bp_norm * np.sin(de[np.newaxis, :]), axis = 1) * (de[1] - de[0]))*(az[1] - az[0]) # approximate integral over the sphere using the trapezoidal rule, with cos(de) weighting for the spherical coordinates
         directivity = bp_norm[az == 0, de == 0] / (sum_over_sphere / (2 * np.pi))
         DI = 10 * np.log10(directivity[0])
 
-        # 2. Array gain vs. spatially white noise
-        w = self.compute_steering_vector(np.array([[0]]), np.array([[0]]), self.array.design_frequency).flatten() # shape (num_elements,)
-        array_gain = 1 / np.linalg.norm(np.abs(w))**2
-        array_gain_db = 10 * np.log10(array_gain)
+        # 2. Min, Mean, Max HPBW
+        bp_norm_db = 10 * np.log10(bp_norm)
+        hpbw_de = np.zeros(len(az))
+        for i, th in enumerate(az):
+            # find de where beampattern first drops below -3 dB for this azimuth
+            de_slice = bp_norm_db[i, :]
+            if np.any(de_slice < -3):
+                hpbw_de[i] = de[np.where(de_slice < -3)[0][0]] # find the first elevation where the beampattern drops below -3 dB
+            else:
+                hpbw_de[i] = np.radians(90) # if the beampattern never drops below -3 dB, set the HPBW to 90 degrees
 
-        return DI, array_gain_db
+        min_hpbw = np.min(hpbw_de)
+        mean_hpbw = np.mean(hpbw_de)
+        max_hpbw = np.max(hpbw_de)
+
+        # 3. Maximum side-lobe level (assuming max at 0, 0)
+        # find first minimum after the main lobe
+        msll = np.zeros(len(az))
+        for i, th in enumerate(az):
+            de_slice = bp_norm_db[i, :]
+            null = np.where(np.diff(np.sign(np.diff(de_slice)) > -1))[0]
+            if len(null) > 0:
+                msll[i] = np.max(de_slice[null[0]:])
+            else:
+                msll[i] = de_slice[-1]
+        msll = np.max(msll)
+
+        return DI, (min_hpbw, mean_hpbw, max_hpbw), msll
 
 #region Plotting Functions
 class BeamformingPlot:
@@ -536,45 +583,118 @@ class BeamformingPlot:
         ax.set_zlim(-50, 50)
         ax.grid()
         
-
 #region Example runs
 if __name__ == "__main__":
 
-    # random point search
-    X = np.zeros(16)
-    Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
-    Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
-
-    # # spiral search
+    # # random point search
     # X = np.zeros(16)
-    # Y = np.array([np.float64(0.0), np.float64(-0.05), np.float64(-0.02), np.float64(-0.21), np.float64(0.1), np.float64(0.2), np.float64(-0.19), np.float64(-0.34), np.float64(-0.31), np.float64(0.16), np.float64(0.58), np.float64(0.63), np.float64(0.77), np.float64(0.74), np.float64(1.29), np.float64(1.2)])
-    # Z = np.array([np.float64(0.0), np.float64(-0.03), np.float64(0.02), np.float64(0.11), np.float64(0.26), np.float64(0.4), np.float64(0.83), np.float64(0.69), np.float64(1.0), np.float64(1.28), np.float64(1.45), np.float64(1.41), np.float64(1.56), np.float64(1.41), np.float64(1.46), np.float64(1.31)])
+    # Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
+    # Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
+
+
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260417-120246.npz'))
+    coords = opt_data['arr_0']
+    accepted_states = opt_data['arr_1']
+    accepted_energies = opt_data['arr_2']
+    # spiral search
+    X = np.zeros(16)
+    Y = coords[:,0]
+    Z = coords[:,1]
+
+    running_min = np.minimum.accumulate(accepted_energies)
+    mask = np.concatenate(([True], np.diff(running_min) < 0))
+    decreasing_states = accepted_states[mask, :]
+    decreasing_energies = accepted_energies[mask]
+    accepted_coords = np.zeros((decreasing_states.shape[0], coords.shape[0], 2))
+
+    curr_angle = np.zeros(accepted_coords.shape[0])
+    for i in range(1, 16):
+        curr_angle += decreasing_states[:, (16 - 1) + (i - 1)]
+        accepted_coords[:, i, 0] = accepted_coords[:, i-1, 0] + decreasing_states[:,i-1] * np.cos(curr_angle)
+        accepted_coords[:, i, 1] = accepted_coords[:, i-1, 1] + decreasing_states[:,i-1] * np.sin(curr_angle)
+
+    last_points = accepted_coords[:, -1, :]
+    angles = np.arctan2(last_points[:, 1], last_points[:, 0])
+
+    rotated_coords = accepted_coords.copy()
+    
+    # rotate accepted coords
+    rotated_coords[:, :, 0] = accepted_coords[:, :, 0] * np.cos(-angles)[:, np.newaxis] - accepted_coords[:, :, 1] * np.sin(-angles)[:, np.newaxis]
+    rotated_coords[:, :, 1] = accepted_coords[:, :, 0] * np.sin(-angles)[:, np.newaxis] + accepted_coords[:, :, 1] * np.cos(-angles)[:, np.newaxis]
+
+    accepted_coords = rotated_coords.copy()
+
+    if np.any(accepted_coords[:, -1, 1] > 1e-6):
+        print(accepted_coords[:, -1, 1])
+        raise ValueError("Last points are not on x-axis")
+
+    fig, ax = plt.subplots(figsize = (8, 8))
+    limit = np.max(np.abs(accepted_coords))
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle = '--', alpha = 0.6)
+
+    my_cmap = cm.get_cmap('turbo') # Choose a vibrant colormap
+    colors = my_cmap(np.linspace(0, 1, 16)) # colors.shape is now (360, 360, 4) - RGBA      
+     
+    scat = ax.scatter(accepted_coords[0, :, 0].flatten(), accepted_coords[0, :, 1].flatten(), s = 50, c = colors, marker = 'o', edgecolors='k', zorder=10)
+    text_energy = ax.text(0.02, 0.90, '', transform=ax.transAxes, fontweight='bold')
+
+    def init():
+        scat.set_offsets(np.empty((0,2)))
+        text_energy.set_text('')
+        return scat, text_energy
+    
+    def update(frame):
+
+        current_points = accepted_coords[frame]
+        scat.set_offsets(current_points)
+        text_energy.set_text(f"Energy: {decreasing_energies[frame]:.2e}")
+        
+        return scat, text_energy
+    
+    ani = FuncAnimation(fig, update, frames = len(accepted_coords), init_func = init, blit = True, interval = 1000)
 
     array = BeamformingArray(X, Y, Z, design_frequency=3e3, element_directivity=ElementDirectivity.DIPOLE)
     bf_model = BeamformingModel(array)
     plotter = BeamformingPlot(bf_model)
 
-    fig, ax = plt.subplots()
-    fig2, ax2 = plt.subplots()
-
     f = 3 * np.logspace(2, 3, num = 10)
-    for freq in f:
-        DI, array_gain = bf_model.get_beamforming_performance_measures(frequency=freq)
-        print(f"DI, AG @ {freq:.0f} Hz: {DI:.2f}, {array_gain:.2f}")
+    hpbw = np.zeros((len(f), 3))
+    di = np.zeros(len(f))
+    msll = np.zeros(len(f))
+    for i, freq in enumerate(f):
+        di[i], (hpbw[i,0], hpbw[i,1], hpbw[i,2]), msll[i] = bf_model.get_beamforming_performance_measures(frequency=freq)
         az, de, bp = bf_model.compute_beampattern(frequency=freq, shading_method='uniform')
-        plotter.plot_beampattern_slice(ax, az, de, bp, slice_az = np.radians(90), label_text = f'{freq:.0f} Hz', style = 'cartesian')
-        plotter.plot_beampattern_slice(ax2, az, de, bp, slice_az = np.radians(0), label_text = f'{freq:.0f} Hz', style = 'cartesian')
-    ax.legend()
+
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].plot(f, di)
+    ax[0].set_xscale('log')
+    ax[0].set_xlabel('Frequency (Hz)')
+    ax[0].set_ylabel('Directivity Index (dB)')
+    ax[0].set_title('Directivity Index vs Frequency')
+    ax[0].grid()
+
+    ax[1].plot(f, np.degrees(hpbw[:, 0]), 'b-', label='Min HPBW')
+    ax[1].plot(f, np.degrees(hpbw[:, 1]), 'k--', label='Mean HPBW')
+    ax[1].plot(f, np.degrees(hpbw[:, 2]), 'r-', label='Max HPBW')
+    ax[1].set_xscale('log')
+    ax[1].set_xlabel('Frequency (Hz)')
+    ax[1].set_ylabel('HPBW (degrees)')
+    ax[1].set_title('HPBW vs Frequency')
+    ax[1].legend()
+    ax[1].grid()
+
+    ax[2].plot(f, msll)
+    ax[2].set_xscale('log')
+    ax[2].set_xlabel('Frequency (Hz)')
+    ax[2].set_ylabel('Max Side Lobe Level (dB)')
+    ax[2].set_title('MSLL vs. Frequency')
+    ax[2].grid()
 
     fig, ax = plt.subplots()
     
     array.plot_array_connections(fig, ax)
-    # theta_fine = np.arange(0, theta_2, 0.01)
-    # r_fine = a + b * theta_fine**(1/c)
 
-    # line_y = r_fine * np.cos(theta_fine)
-    # line_z = r_fine * np.sin(theta_fine)
-    # line_x = np.zeros_like(line_y) # Matches your sensor X array
-
-    # plt.plot(line_x, line_y, line_z, color='gray', linestyle='--', alpha=0.6, label='Spiral Path')
     plt.show()
