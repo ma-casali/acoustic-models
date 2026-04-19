@@ -12,7 +12,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtCore import Qt
 import numpy as np
 import sys
-from main_solver import run_solver_from_gui
+import os
+sys.path.append(os.path.abspath('../acoustic-models'))
+from PWE.main_solver import run_solver_from_gui
 
 class ConfigManager(QObject):
     configChanged = pyqtSignal(str, object)
