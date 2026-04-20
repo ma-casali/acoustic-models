@@ -112,13 +112,17 @@ class BeamformingArray:
         ax.set_ylim(min(np.min(self.Y), -max_dim), max(np.max(self.Y), max_dim))
         ax.set_zlim(min(np.min(self.Z), -max_dim), max(np.max(self.Z), max_dim))
 
-    def plot_array_connections(self, fig = None, ax = None):
+    def plot_array_connections(self, fig = None, ax = None, f = None, c = None):
 
         if fig is None or ax is None:
             fig, ax = plt.subplots()
 
-        f = 3 * np.logspace(2, 3, num = 10) # generic frequencies (used in optimization)
-        lam = 343 / f
+        if f is None:
+            f = 3 * np.logspace(2, 3, num = 10) # generic frequencies (used in optimization)
+        if c is None:
+            c = 343
+
+        lam = c / f
         spacing = lam / 2 # half wavelength max. spacing for each frequency
 
         points = np.column_stack((self.Y, self.Z)) # shape (num_elements, 3)

@@ -13,7 +13,7 @@ from BeamformingModel import BeamformingModel
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath('../acoustic-models'))
-from SimulatedAnnealing import SAOptimization
+from SimulatedAnnealing import SAOptimization, SAParallel
 
 # This is a problem that is perfect for simulated annealing, since the objective function is discrete valued and non-differentiable
 
@@ -21,22 +21,26 @@ num_elements = 16
 
 now = datetime.now().strftime("%Y%m%d-%H%M%S")
 save_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_'+now)
-print(save_file)
 
-d_min = 343 / 3000 / 2 # half wavelength at 3 kHz
-d_max = 343 / 300 / 2 # half wavelength at 300 Hz
+d_min = 1460 / 500 / 2 # half wavelength at 500 Hz
+d_max = 1460 / 50 / 2 # half wavelength at 50 Hz
+
 d_lims = np.tile([[d_min, d_max - 0.01]], (num_elements-1, 1)) # make sure an element point isn't rounded above d_max
-theta_lims = np.tile([[np.radians(-179.5), np.radians(180)]], (num_elements-1, 1))
+theta_lims = np.tile([[np.radians(0), np.radians(359.5)]], (num_elements-2, 1))
+theta_lims[0,:] = [np.radians(0), np.radians(180)] # limit the angle from the second element to avoid symmetric duplicates of the same array geometry
+
 d_inc = np.tile(d_min, num_elements-1)
-th_inc = np.tile(np.radians(0.5), num_elements-1)
+th_inc = np.tile(np.radians(0.5), num_elements-2)
+
 d_0 = np.random.uniform(d_lims[:, 0], d_lims[:, 1], size = num_elements-1)
-th_0 = np.random.uniform(theta_lims[:, 0], theta_lims[:, 1], size = num_elements-1)
-search_scaling = np.linspace(0.1, 1.0, num_elements-1) # search smaller changes for earlier elements and larger changes for later elements since earlier elements have a larger effect on the overall array geometry
-search_scaling = np.concatenate((search_scaling, search_scaling)) # apply same scaling to both distance and angle parameters
+th_0 = np.random.uniform(theta_lims[:, 0], theta_lims[:, 1], size = num_elements-2) # element 2 is always on y-axis
 
 initial_state = np.concatenate((d_0, th_0))
 state_lims = np.concatenate((d_lims, theta_lims)).T
 state_inc = np.concatenate((d_inc, th_inc))
+
+circular_inds = np.full_like(initial_state, False, dtype = bool)
+circular_inds[len(d_0) + 2:] = True # angles are circular variables
 
 def objective_function_fast(state, optimal_state = False):
 
@@ -44,7 +48,7 @@ def objective_function_fast(state, optimal_state = False):
         if a * x < 1e-6:
             return 1e6
         else:
-            return 1/(a * x) + b
+            return 1/(a * x) + b 
     
     gamma_number = 1
     gamma_std = 1
@@ -127,18 +131,19 @@ def objective_function_slow(state, optimal_state = False):
 
     penalty_add = 0
 
-    num_elements = len(state) // 2 + 1
+    num_elements = len(state) // 2 + 2
     coords = np.zeros((num_elements, 2), dtype=np.float32)
+    coords[1, :] = [0, state[0]] # place the second element on the y-axis to break symmetry and reduce the search space
     
     curr_angle = 0
-    for i in range(1, num_elements):
-        curr_angle += state[(num_elements - 1) + (i - 1)]
+    for i in range(2, num_elements):
+        curr_angle += state[(num_elements - 1)+ (i - 2)]
         coords[i, 0] = coords[i-1, 0] + state[i-1] * np.cos(curr_angle)
         coords[i, 1] = coords[i-1, 1] + state[i-1] * np.sin(curr_angle)
 
     coords = np.round(coords, decimals = 2) # round to 2 decimals to align with centimeter spaced grid
 
-    f = 3 * np.logspace(2, 3, num = 3) # generic frequencies (used in optimization)
+    f = 5 * np.logspace(1, 2, num = 3) # generic frequencies (used in optimization)
     f_1 = np.random.uniform(f[0]*1.05, f[0]*0.95, size = 3)
     f_2 = np.random.uniform(f[1]*1.05, f[2]*0.95, size = 4)
     f = np.concatenate(([f[0]], f_1, [f[1]], f_2, [f[2]])) # add some randomization to the frequencies used in optimization to avoid overfitting to specific frequencies
@@ -173,7 +178,8 @@ def objective_function_slow(state, optimal_state = False):
     penalty_di = np.exp(-np.min(di) * np.log(2) / 8) # [1 -> 0], higher is better, 0.5 at 8 dB  
     penalty_di += np.exp(-np.max(di) * np.log(2) / 8) # [1 -> 0], higher is better, 0.5 at 8 dB
     penalty_di_variance = 2 / ( 1 + np.exp(-np.std(di))) - 1 # [0 -> 1], lower is better
-    penalty_side_lobe = 0.1 * np.exp(-np.min(np.abs(msll)) * np.log(2) / 3) # [0.1 -> 0], higher is better, 0.05 at 3 dB down, de-emphasized 
+    penalty_side_lobe = np.exp(-np.min(np.abs(msll)) * np.log(2) / 3) # [1 -> 0], higher is better, 0.5 at 3 dB down
+
     # penalty_hpbw = 2 / (1 + np.exp(-np.max(hpbw[:, 2]))) - 1 # [0 -> 1], lower is better
     # penalty_hpbw_range = 2 / (1 + np.exp(-np.max(hpbw[:, 2] - hpbw[:, 0]))) - 1 # [0 -> 1], lower is better
         
@@ -188,27 +194,43 @@ def objective_function_slow(state, optimal_state = False):
 
     return penalty
 
-opt = SAOptimization(objective_function_slow, state_0 = initial_state, state_lims = state_lims, state_inc = state_inc, search_scaling = search_scaling)
-optimal_state, optimal_value, accepted_states, accepted_energies, proposed_states = opt.optimize()
+def search_scaling(state, state_inc):
 
-print("Penalty components: ", objective_function_slow(optimal_state, optimal_state = True))
+    # scaling occurs only for angles
+    # each angle has an effect equivalent to how much extent that it rotates
+    # scale this effect so that it's normalized to the effect of the last angle
+    # in other words, each angle should have similar effect on the search space
 
-coords = np.zeros((num_elements, 2), dtype=np.float32)
-curr_angle = 0
-for i in range(1, num_elements):
-    curr_angle += optimal_state[(num_elements - 1) + (i - 1)]
-    coords[i, 0] = coords[i-1, 0] + optimal_state[i-1] * np.cos(curr_angle)
-    coords[i, 1] = coords[i-1, 1] + optimal_state[i-1] * np.sin(curr_angle)
+    theta = state[len(state) // 2 + 1:] # for 16 elements, this should be 14 angles
+    d = state[1:len(state) // 2 + 1]
+    scaling = np.ones_like(state)
+    r = d * np.cos(np.flip(np.cumsum(np.flip(theta))))
+    theta_inc_prime = np.abs(np.arctan(0.01 / r))
+    scaling[len(state) // 2 + 1:] = theta_inc_prime[-1] / theta_inc_prime
 
-Y = coords[:, 0]
-Z = coords[:, 1]
-plt.scatter(Y, Z)
+    return scaling
 
-np.savez(save_file, coords, accepted_states, accepted_energies, optimal_value)
+if __name__ == "__main__":
+    np.random.seed(13)
 
-print("Optimal state (Y): ", [(np.round(float(y), 2)) for y in Y])
-print("Optimal state (Z): ", [(np.round(float(z), 2)) for z in Z])
+    parallel_opt = SAParallel(n_opt=5, temp_ratio=10)
+    min_opt = parallel_opt.run(func = objective_function_slow, ndim = np.shape(state_inc)[0], state_lims = state_lims, state_inc = state_inc, search_scaling_func = search_scaling)
+    optimal_state = min_opt.global_min_state
 
-opt.plot_results()
-plt.show()
+    coords = np.zeros((num_elements, 2), dtype=np.float32)
+    coords[1, :] = [0, optimal_state[0]] # place the second element on the y-axis to break symmetry and reduce the search space
+    curr_angle = 0
+    for i in range(2, num_elements):
+        curr_angle += optimal_state[(num_elements - 1)+ (i - 2)]
+        coords[i, 0] = coords[i-1, 0] + optimal_state[i-1] * np.cos(curr_angle)
+        coords[i, 1] = coords[i-1, 1] + optimal_state[i-1] * np.sin(curr_angle)
+
+    Y = coords[:, 0]
+    Z = coords[:, 1]
+    plt.scatter(Y, Z)
+
+    np.savez(save_file, coords, min_opt.accepted_states, min_opt.accepted_energies, min_opt.global_min_energy)
+
+    min_opt.plot_results()
+    plt.show()
 

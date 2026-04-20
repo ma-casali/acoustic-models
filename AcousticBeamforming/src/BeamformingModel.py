@@ -7,6 +7,7 @@ from matplotlib.animation import FuncAnimation
 import os
 from sklearn.neighbors import NearestNeighbors
 from matplotlib.animation import FuncAnimation
+
 from BeamformingArray import BeamformingArray, ElementDirectivity
 from ArrayShading import ArrayShading
 
@@ -354,7 +355,7 @@ class BeamformingModel:
             if len(null) > 0:
                 msll[i] = np.max(de_slice[null[0]:])
             else:
-                msll[i] = de_slice[-1]
+                msll[i] = 0 # because without a main lobe, it's all one big side lobe
         msll = np.max(msll)
 
         return DI, (min_hpbw, mean_hpbw, max_hpbw), msll
@@ -591,8 +592,7 @@ if __name__ == "__main__":
     # Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
     # Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
 
-
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260417-120246.npz'))
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260420-125257.npz'))
     coords = opt_data['arr_0']
     accepted_states = opt_data['arr_1']
     accepted_energies = opt_data['arr_2']
@@ -608,11 +608,11 @@ if __name__ == "__main__":
     accepted_coords = np.zeros((decreasing_states.shape[0], coords.shape[0], 2))
 
     curr_angle = np.zeros(accepted_coords.shape[0])
-    for i in range(1, 16):
-        curr_angle += decreasing_states[:, (16 - 1) + (i - 1)]
+    for i in range(2, 16):
+        curr_angle += decreasing_states[:, (16 - 1) + (i - 2)]
         accepted_coords[:, i, 0] = accepted_coords[:, i-1, 0] + decreasing_states[:,i-1] * np.cos(curr_angle)
         accepted_coords[:, i, 1] = accepted_coords[:, i-1, 1] + decreasing_states[:,i-1] * np.sin(curr_angle)
-
+    
     last_points = accepted_coords[:, -1, :]
     angles = np.arctan2(last_points[:, 1], last_points[:, 0])
 
@@ -660,7 +660,7 @@ if __name__ == "__main__":
     bf_model = BeamformingModel(array)
     plotter = BeamformingPlot(bf_model)
 
-    f = 3 * np.logspace(2, 3, num = 10)
+    f = 5 * np.logspace(1, 2, num = 10)
     hpbw = np.zeros((len(f), 3))
     di = np.zeros(len(f))
     msll = np.zeros(len(f))
@@ -695,6 +695,6 @@ if __name__ == "__main__":
 
     fig, ax = plt.subplots()
     
-    array.plot_array_connections(fig, ax)
+    array.plot_array_connections(fig, ax, f=f)
 
     plt.show()
