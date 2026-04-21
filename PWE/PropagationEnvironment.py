@@ -1,8 +1,13 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 import scipy.stats
 import scipy.interpolate
+
+sys.path.append(os.path.abspath('../acoustic-models'))
+
+from PWE.GenerateRadialTopography import TopographyRadials
 
 class PropagationEnvironment:
     """
@@ -11,9 +16,9 @@ class PropagationEnvironment:
 
     def __init__(self, 
                  f, c_0, z_0=None, max_range=None, z_lims=None, 
-                 roughness=None, topography=None, topography_lims=None,
+                 roughness=None, topography=None, topography_lims=None, topography_method = None,
                  ssp=None, rho=None, alpha=None,
-                 measurement_points=None):
+                 ranges=None, bearing=None):
         """
         INPUTS
         f: frequency of study [Hz]
@@ -43,7 +48,7 @@ class PropagationEnvironment:
         self.max_range = max_range
         
         # Handle topography parameters
-        if topography is None:
+        if topography is None and topography_method == 'generate':
             # Need parameters to generate topography
             if any(item is None for item in [max_range, z_0, z_lims, roughness]):
                 raise ValueError(
@@ -54,19 +59,20 @@ class PropagationEnvironment:
             self.z_lims = np.array(z_lims)
             self.roughness = roughness
             self.topography_input = self._compute_topography()
-        else:
-            # Use provided topography
-            self.ranges = np.arange(0, np.max(measurement_points[:,0]), self.k)
-            self.topography_input = np.interp(self.ranges, np.unique(measurement_points[:,0]), topography)
-            self.z_0 = topography[0] if z_0 is None else z_0
-            self.z_lims = [np.min(measurement_points[:,1]), np.max(measurement_points[:,1])]
-            self.roughness = roughness
-        
-        # Generate mesh from topography
-        self._generate_mesh()
-        
-        # Store measurement points
-        self.measurement_points = measurement_points
+            
+            # Generate mesh from topography
+            self._generate_mesh()
+        elif topography is None and topography_method == 'radial':
+            
+            self.ranges = np.arange(0, max_range, self.k)
+            self.topography_input = self._retrieve_topography(bearing = bearing)
+            self.z_lims = [z_lims[0], np.max(self.topography_input)]
+            self._generate_mesh()
+
+            self.z_0 = self.topography_input[0] if z_0 is None else z_0
+
+        # measurement points for density, ssp
+        self.measurement_points = None
         
         # Interpolate/compute physical properties
         self.ssp = self._process_ssp(ssp)
@@ -77,6 +83,19 @@ class PropagationEnvironment:
         self._add_absorbing_layer()
         
         print(f"Environment initialized: {len(self.r_mesh)} × {len(self.z_mesh)} grid")
+
+    def _retrieve_topography(self, bearing: np.ndarray = None):
+        """
+        Use TopographyRadials to generate topography
+        """
+
+        topo_file = 'PWE/Data/Topography/MontereyBay.tiff'
+        mars_coords = np.array([36 + 42.7481/60, -122 - 11.2139/60])
+        topo_radials = TopographyRadials(center_coords=mars_coords, topo_file=topo_file)
+
+        self.topography = topo_radials.generate_radials(bearing, self.ranges)[0, :].flatten()
+
+        return self.topography
 
     def _compute_topography(self):
         """
@@ -468,9 +487,9 @@ class Water(PropagationEnvironment):
 
     def __init__(self, 
                  f, z_0=None, max_range=None, z_lims=None, 
-                 roughness=None, topography=None, topography_lims=None,
+                 roughness=None, topography=None, topography_lims=None, topography_method=None,
                  ssp=None, rho=None, alpha=None,
-                 measurement_points=None):
+                 ranges=None, bearing = None):
         c_0 = 1500
 
         self.name = 'water'
@@ -481,9 +500,9 @@ class Water(PropagationEnvironment):
             ])
 
         super().__init__(f, c_0, z_0, max_range, z_lims, 
-                 roughness, topography, topography_lims,
+                 roughness, topography, topography_lims,topography_method,
                  ssp, rho, alpha,
-                 measurement_points)
+                 ranges,bearing)
 
     def _create_default_ssp(self):
         """Create default Munk profile."""

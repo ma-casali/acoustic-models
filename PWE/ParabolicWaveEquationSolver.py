@@ -5,7 +5,37 @@ from scipy.sparse.linalg import spsolve, splu
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
-from PropagationEnvironment import PropagationEnvironment
+import sys
+import os
+
+sys.path.append(os.path.abspath('../acoustic-models'))
+
+from PWE.GenerateRadialTopography import TopographyRadials
+from PWE.PropagationEnvironment import PropagationEnvironment, Water, Air
+
+def u0_gaussian_generalized(z, z_s, k_0):
+    """
+    Gaussian initial field with configurable beamwidth and steering.
+    
+    Parameters:
+    -----------
+    z : array-like
+        Depth array [m]
+    z_s : float
+        Source depth [m]
+    k_0 : float
+        Reference wavenumber [1/m]
+    
+    Returns:
+    --------
+    u_0 : array-like
+        Initial field amplitude
+    """
+    theta_half_bw = 45 * np.pi / 180  # beamwidth [rad]
+    theta_tilt = 0 * np.pi / 180      # beam-steering [rad]
+    return np.sqrt(k_0) * np.tan(theta_half_bw) * np.exp(
+        -1 * k_0**2 / 2 * (z - z_s)**2 * np.tan(theta_half_bw)**2
+    ) * np.exp(-1j * k_0 * (z - z_s) * np.sin(theta_tilt))
 
 class ParabolicWaveEquationSolver:
     """
@@ -144,7 +174,10 @@ class ParabolicWaveEquationSolver:
             self.u[0, :] = u0_func(self.z_mesh, z_s, self.k_0)
 
         if self.topography[0] - z_s < self.c_0/self.f:
-            raise ValueError('Source is within a wavelength of the sea floor and initial value is ill-poised for this solution type.')
+            raise ValueError(f"Source is within a wavelength of the sea floor and initial value is ill-poised for this solution type.\n \
+                             Source Depth: {z_s:.3f} m,\n \
+                             Bottom Depth: {self.topography[0]:.3f} m\n \
+                             Wavelength: {self.c_0/self.f:.3f}")
             
         # Pre-compute items for the solver
 
@@ -211,3 +244,20 @@ class ParabolicWaveEquationSolver:
             ax.get_xticklabels
             
         plt.savefig('Figures/sample_figure.png')
+
+if __name__ == "__main__":
+
+    topo_file = 'PWE/Data/Topography/MontereyBay.tiff'
+    mars_coords = np.array([36 + 42.7481/60, -122 - 11.2139/60])
+    topo_radials = TopographyRadials(center_coords=mars_coords, topo_file=topo_file)
+
+    bearings = np.arange(-180, 0, 15)
+    for i, th in enumerate(bearings):
+
+        environment = Water(f=50, topography_method='radial', max_range = 50e3, z_lims=[0, 3e3], bearing = np.array([th]))
+        pwe_solver = ParabolicWaveEquationSolver(environment=environment)
+        pwe_solver.solve(u0_gaussian_generalized, z_s = environment.topography[0] - environment.c_0/50)
+
+        pwe_solver.plot()
+
+    plt.show()
