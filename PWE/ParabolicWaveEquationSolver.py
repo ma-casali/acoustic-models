@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 import sys
 import os
+import cmocean
+from mpl_toolkits import basemap
 
 sys.path.append(os.path.abspath('../acoustic-models'))
 
@@ -251,13 +253,52 @@ if __name__ == "__main__":
     mars_coords = np.array([36 + 42.7481/60, -122 - 11.2139/60])
     topo_radials = TopographyRadials(center_coords=mars_coords, topo_file=topo_file)
 
-    bearings = np.arange(-180, 0, 15)
+    bearings = np.arange(-180, 0, 1) # degrees
     for i, th in enumerate(bearings):
 
-        environment = Water(f=50, topography_method='radial', max_range = 50e3, z_lims=[0, 3e3], bearing = np.array([th]))
+        layout_format = [['.', '.', 'B', 'B', 'B', 'B', 'B', 'B'],
+                         ['A', 'A', 'B', 'B', 'B', 'B', 'B', 'B'],
+                         ['A', 'A', 'B', 'B', 'B', 'B', 'B', 'B'],
+                         ['.', '.', 'B', 'B', 'B', 'B', 'B', 'B']]
+        fig, ax = plt.subplot_mosaic(layout_format, figsize = (15, 5))
+
+        m = basemap.Basemap(llcrnrlon=topo_radials.box_bounds.left,
+            llcrnrlat=topo_radials.box_bounds.bottom,
+            urcrnrlon=topo_radials.box_bounds.right,
+            urcrnrlat=topo_radials.box_bounds.top,
+            projection = 'lcc', resolution = 'i',
+            lat_1 = topo_radials.box_bounds.bottom,
+            lat_0 = mars_coords[0], lon_0 = mars_coords[1], ax = ax['A'])
+        
+        m.drawcoastlines()
+        m.fillcontinents(color='green')
+
+        r_max = 75e3
+        dr = 1e3
+        r_line = np.arange(0, r_max, dr)
+        lat_line, lon_line = topo_radials.get_destination_point(r_line, np.array([th]))
+
+        topo = topo_radials.topo_data
+        topo[topo < 0] = np.nan
+        topo[topo > 3e3] = np.nan
+        cmap = cmocean.cm.deep
+
+        m.pcolormesh(topo_radials.LON, topo_radials.LAT, topo, shading = 'nearest', cmap = cmap, latlon = True)
+        m.plot(lon_line, lat_line, 'r', linewidth = 2, latlon = True)
+        m.scatter(mars_coords[1], mars_coords[0], s = 50, marker = 'o', color = 'r', latlon = True)
+        m.scatter(lon_line[-1], lat_line[-1], s = 40, marker = '^', color = 'r', latlon=True)
+
+        # # ax['A'].set_xticks([])
+        # # ax['A'].set_yticks([])
+        # ax['A'].margins(0)
+
+        environment = Water(f=50, topography_method='radial', max_range = r_max, z_lims=[0, 3e3], bearing = np.array([th]))
         pwe_solver = ParabolicWaveEquationSolver(environment=environment)
         pwe_solver.solve(u0_gaussian_generalized, z_s = environment.topography[0] - environment.c_0/50)
 
-        pwe_solver.plot()
+        pwe_solver.plot(fig = fig, ax = ax['B'])
+        ax['B'].scatter(0, environment.z_lims[-1], s = 50, marker = 'o', color = 'r')
+        ax['B'].scatter(r_max, environment.z_lims[-1], s = 50, marker = '^', color = 'r')
+        plt.tight_layout()
 
-    plt.show()
+        plt.show()

@@ -59,7 +59,7 @@ class SAParallel:
             self.optimizers.append(opt)
 
         total_calls = 0
-        max_calls = 1e6
+        max_calls = 1e6 * self.n_opt
         self.swap_ratio = np.empty(self.window_length)
         best_min = np.inf
         iter_since_improvement = 0
@@ -87,14 +87,14 @@ class SAParallel:
                 temps = np.array([opt.temperature[0] for opt in self.optimizers])
                 temps = temps / np.max(temps)
                 temps_str = np.array2string(temps, formatter={'float_kind':lambda x: f"{x:.2f}"})
-                print(f"\rMean Swap Ratio: {np.nanmean(self.swap_ratio):.2f} | Total Calls: {total_calls} | Best Energy: {current_min_opt.global_min_energy:.4f} | T: {temps_str} | Progress: {iter_since_improvement}/{self.optimizers[0].ndim * 5}", end = "")
+                print(f"\rMean Swap Ratio: {np.nanmean(self.swap_ratio):.2f} | Total Calls: {total_calls} | Best Energy: {current_min_opt.global_min_energy:.4f} | Progress: {iter_since_improvement}/{self.optimizers[0].ndim * 5}", end = "")
                 
                 if best_min == current_min_opt.global_min_energy:
                     iter_since_improvement += 1
                 else:
                     iter_since_improvement = 0
 
-                if np.nanmean(self.swap_ratio) < 0.01 or iter_since_improvement >= self.optimizers[0].ndim * 5:
+                if np.nanmean(self.swap_ratio) < 1e-5 or iter_since_improvement >= self.optimizers[0].ndim * 5:
                     continue_flag = False
 
         return current_min_opt

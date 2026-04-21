@@ -3,4 +3,5 @@ AcousticBeamforming/Figures/*
 AcousticBeamforming/src/__pycache__/*
 AcousticBeamforming/.DS_Store
 .DS_Store
+**/__pycache__/*
 

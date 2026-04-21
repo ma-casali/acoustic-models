@@ -20,14 +20,15 @@ class TopographyRadials():
             # topo_data = src.read(1)
             self.box_bounds = src.bounds
             
-            self.lat = np.linspace(self.box_bounds.bottom, self.box_bounds.top, src.shape[1])
-            self.lon = np.linspace(self.box_bounds.left, self.box_bounds.right, src.shape[0])
-            self.LAT, self.LON = np.meshgrid(self.lat, self.lon)
+            self.lat = np.linspace(self.box_bounds.bottom, self.box_bounds.top, src.shape[0])
+            self.lon = np.linspace(self.box_bounds.left, self.box_bounds.right, src.shape[1])
+            self.LON, self.LAT = np.meshgrid(self.lon, self.lat)
 
-            self.topo_data = np.abs(src.read(1) * 0.3048) # convert to m, and +depth in direction of -z
-
+            # convert to m, and +depth in direction of -z
+            self.topo_data = (-src.read(1) * 0.3048)[::-1, :] # shape (lat, lon)
+            
         # lat, lon in degrees, depth in ft. 
-        self.sample_func = scipy.interpolate.RegularGridInterpolator((self.lat[::-1], self.lon), self.topo_data.T)
+        self.sample_func = scipy.interpolate.RegularGridInterpolator((self.lat, self.lon), self.topo_data)
         self.center_depth = self.sample_func(center_coords)
 
     def generate_radials(self, 

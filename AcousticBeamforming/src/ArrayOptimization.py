@@ -17,7 +17,7 @@ from SimulatedAnnealing import SAOptimization, SAParallel
 
 # This is a problem that is perfect for simulated annealing, since the objective function is discrete valued and non-differentiable
 
-num_elements = 16
+num_elements = 10
 
 now = datetime.now().strftime("%Y%m%d-%H%M%S")
 save_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_'+now)
@@ -213,7 +213,7 @@ def search_scaling(state, state_inc):
 if __name__ == "__main__":
     np.random.seed(13)
 
-    parallel_opt = SAParallel(n_opt=5, temp_ratio=10)
+    parallel_opt = SAParallel(n_opt=20, temp_ratio=10)
     min_opt = parallel_opt.run(func = objective_function_slow, ndim = np.shape(state_inc)[0], state_lims = state_lims, state_inc = state_inc, search_scaling_func = search_scaling)
     optimal_state = min_opt.global_min_state
 
