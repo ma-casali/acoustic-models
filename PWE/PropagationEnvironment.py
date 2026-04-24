@@ -553,7 +553,7 @@ class Water(PropagationEnvironment):
 
         return rho
 
-    def _create_default_alpha(self, pH = 8.1, S = 35, T = 20):
+    def _create_default_alpha(self, pH = 8.1, S = 33, T = 13):
 
         # proportionality factors [dB/(km*kHz)]
         A_1 = 8.86/self.ssp * 10**(0.78 * pH - 5)
@@ -572,13 +572,16 @@ class Water(PropagationEnvironment):
         f_1 = 2.8 * (S/35)**0.5 * 10**(4 - 1245*(T + 273))
         f_2 = 8.17 * 10**(8-1990/(T + 273)) / (1 + 0.0018*(S - 35))
 
+        f = self.f/1000 # in kHz
+
         # putting alpha together
-        boric_acid_term = A_1*P_1*f_1*self.f**2 / (self.f**2 + f_1**2)
-        magnesium_sulfate_term = A_2*P_2*f_2*self.f**2 / (self.f**2 + f_2**2)
-        pure_water_term = A_3*P_3*self.f**2
+        boric_acid_term = A_1*P_1*f_1*f**2 / (f**2 + f_1**2)
+        magnesium_sulfate_term = A_2*P_2*f_2*f**2 / (f**2 + f_2**2)
+        pure_water_term = A_3*P_3*f**2
 
         alpha = boric_acid_term + magnesium_sulfate_term + pure_water_term # dB/km
-        alpha *= 1e-3 / (self.c_0 / self.f)
+        alpha /= (self.c_0 / self.f)
+        alpha /= 8685.89 # convert from dB/km to Np/m
         max_alpha = np.max(alpha)
 
         for i_range in range(len(self.r_mesh)):

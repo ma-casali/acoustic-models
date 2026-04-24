@@ -3,7 +3,7 @@ from PropagationEnvironment import Air, Water
 from ParabolicWaveEquationSolver import ParabolicWaveEquationSolver
 
 
-def u0_gaussian_generalized(z, z_s, k_0):
+def u0_gaussian_generalized(z, z_s, k_0, theta_half_bw = np.radians(45), theta_tilt = np.radians(0)):
     """
     Gaussian initial field with configurable beamwidth and steering.
     
@@ -21,8 +21,7 @@ def u0_gaussian_generalized(z, z_s, k_0):
     u_0 : array-like
         Initial field amplitude
     """
-    theta_half_bw = 45 * np.pi / 180  # beamwidth [rad]
-    theta_tilt = 0 * np.pi / 180      # beam-steering [rad]
+
     return np.sqrt(k_0) * np.tan(theta_half_bw) * np.exp(
         -1 * k_0**2 / 2 * (z - z_s)**2 * np.tan(theta_half_bw)**2
     ) * np.exp(-1j * k_0 * (z - z_s) * np.sin(theta_tilt))

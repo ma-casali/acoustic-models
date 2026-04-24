@@ -7,6 +7,7 @@ from matplotlib.animation import FuncAnimation
 import os
 from sklearn.neighbors import NearestNeighbors
 from matplotlib.animation import FuncAnimation
+from matplotlib.path import Path
 
 from BeamformingArray import BeamformingArray, ElementDirectivity
 from ArrayShading import ArrayShading
@@ -81,10 +82,10 @@ def generate_hex_array(num_elements = 16, d: float = 343/2000/4, max_angle: floa
 
 #region Beamforming Model
 class BeamformingModel:
-    def __init__(self, array: BeamformingArray):
+    def __init__(self, array: BeamformingArray, c: float = 343):
         self.array = array
         self.shading_model = ArrayShading(array)
-        self.c = 343 # speed of sound in m/s
+        self.c = c # speed of sound in m/s
 
     def compute_steering_vector(self, steer_az: np.ndarray, steer_de: np.ndarray, frequency: float) -> np.ndarray:
 
@@ -111,7 +112,7 @@ class BeamformingModel:
     
     def compute_manifold_vector(self, pw_az: np.ndarray, pw_de: np.ndarray, frequency: float) -> np.ndarray:
         
-        c = 343 # speed of sound in m/s
+        c = self.c
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
@@ -164,11 +165,11 @@ class BeamformingModel:
 
         return beam_time_series, beam_time_series_chunks
     
-    def compute_beampattern(self, frequency, 
+    def compute_beampattern(self, frequency, c: float = None, 
                             delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]),
                             shading_method = 'uniform', shading_vector = None, use_primary_filter = False):
         
-        c = 343 # speed of sound in m/s
+        c = c if c is not None else self.c
         wavelength = c / frequency
         k = 2 * np.pi / wavelength # wavenumber
 
@@ -183,8 +184,8 @@ class BeamformingModel:
             element_mask = np.ones(len(self.array.X), dtype=bool)
 
         # compute vectors needed to compute the beampattern
-        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)[:, :, element_mask]
-        steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency)[:, :, element_mask] # shape (num_elements,)
+        manifold_vector = self.compute_manifold_vector(AZ, DE, frequency)[:, :, element_mask] # shape (len(az), len(de), num_elements)
+        steering_vector = self.compute_steering_vector(steer_az, steer_de, frequency)[:, :, element_mask] # shape (len(steer_az), len(steer_de), num_elements)
         if shading_method == 'uniform':
             shading_vector = np.ones(len(self.array.X))[element_mask] # shape (num_elements,)
         elif shading_method == 'raised_cosine':
@@ -313,7 +314,7 @@ class BeamformingModel:
 
         return cutoff_frequencies
     
-    def get_beamforming_performance_measures(self, delta_az = 0.25, delta_de = 0.25, frequency: float = None, use_primary_filter = False):
+    def get_beamforming_performance_measures(self, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), frequency: float = None, c: float = 343, use_primary_filter = False):
 
         """
         Computation of the following performance measusres for a given array:
@@ -324,7 +325,16 @@ class BeamformingModel:
         # 1. Directivity (B(0, 0) / 1/(4*pi) * integral of B(az, de) over the sphere)
         if frequency is None:
             frequency = self.array.design_frequency
-        az, de, bp = self.compute_beampattern(frequency = frequency, delta_az=delta_az, delta_de=delta_de, shading_method='uniform', use_primary_filter=use_primary_filter) # shape (Az, De)
+
+        # rotate the entire array so that the steer_az, steer_de are along the x-axis
+        r = scipy.spatial.transform.Rotation.from_euler('zy', [-steer_az[0][0], steer_de[0][0]])
+        grid_points = np.stack([self.array.X, self.array.Y, self.array.Z], axis = -1)
+        rotated_points = r.apply(grid_points)
+        self.array.X = rotated_points[:, 0]
+        self.array.Y = rotated_points[:, 1]
+        self.array.Z = rotated_points[:, 2]
+
+        az, de, bp = self.compute_beampattern(frequency = frequency, c=c, delta_az=delta_az, delta_de=delta_de, shading_method='uniform', use_primary_filter=use_primary_filter) # shape (Az, De)
 
         bp_norm = np.abs(bp) / np.max(np.abs(bp))
         sum_over_sphere = np.sum(np.sum(bp_norm * np.sin(de[np.newaxis, :]), axis = 1) * (de[1] - de[0]))*(az[1] - az[0]) # approximate integral over the sphere using the trapezoidal rule, with cos(de) weighting for the spherical coordinates
@@ -346,16 +356,16 @@ class BeamformingModel:
         mean_hpbw = np.mean(hpbw_de)
         max_hpbw = np.max(hpbw_de)
 
-        # 3. Maximum side-lobe level (assuming max at 0, 0)
-        # find first minimum after the main lobe
+        # 3. Maximum Side Lobe Level
         msll = np.zeros(len(az))
-        for i, th in enumerate(az):
+        for i in range(len(az)):
             de_slice = bp_norm_db[i, :]
-            null = np.where(np.diff(np.sign(np.diff(de_slice)) > -1))[0]
-            if len(null) > 0:
+            null = np.where(np.sign(np.diff(de_slice)) > -1)[0]
+            if len(null) > 1:
                 msll[i] = np.max(de_slice[null[0]:])
             else:
-                msll[i] = 0 # because without a main lobe, it's all one big side lobe
+                msll[i] = 0
+
         msll = np.max(msll)
 
         return DI, (min_hpbw, mean_hpbw, max_hpbw), msll
@@ -484,7 +494,7 @@ class BeamformingPlot:
             AZ_MESH, R_MESH = np.meshgrid(az, R_COORD, indexing='ij')
 
             # 2. Plot using the new radial mesh
-            im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', vmin=-50, vmax=0, cmap='turbo')
+            im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', vmin=-20, vmax=0, cmap='turbo')
             
             fig.colorbar(im, ax=ax, label='Beamforming Gain (dB)')
             
@@ -592,12 +602,13 @@ if __name__ == "__main__":
     # Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
     # Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
 
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260420-125257.npz'))
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260424-132647.npz'))
     coords = opt_data['arr_0']
     accepted_states = opt_data['arr_1']
     accepted_energies = opt_data['arr_2']
+    num_elements = np.shape(coords)[0]
     # spiral search
-    X = np.zeros(16)
+    X = np.zeros(num_elements)
     Y = coords[:,0]
     Z = coords[:,1]
 
@@ -608,8 +619,8 @@ if __name__ == "__main__":
     accepted_coords = np.zeros((decreasing_states.shape[0], coords.shape[0], 2))
 
     curr_angle = np.zeros(accepted_coords.shape[0])
-    for i in range(2, 16):
-        curr_angle += decreasing_states[:, (16 - 1) + (i - 2)]
+    for i in range(2, num_elements):
+        curr_angle += decreasing_states[:, (num_elements - 1) + (i - 2)]
         accepted_coords[:, i, 0] = accepted_coords[:, i-1, 0] + decreasing_states[:,i-1] * np.cos(curr_angle)
         accepted_coords[:, i, 1] = accepted_coords[:, i-1, 1] + decreasing_states[:,i-1] * np.sin(curr_angle)
     
@@ -636,7 +647,7 @@ if __name__ == "__main__":
     ax.grid(True, linestyle = '--', alpha = 0.6)
 
     my_cmap = cm.get_cmap('turbo') # Choose a vibrant colormap
-    colors = my_cmap(np.linspace(0, 1, 16)) # colors.shape is now (360, 360, 4) - RGBA      
+    colors = my_cmap(np.linspace(0, 1, num_elements)) # colors.shape is now (360, 360, 4) - RGBA      
      
     scat = ax.scatter(accepted_coords[0, :, 0].flatten(), accepted_coords[0, :, 1].flatten(), s = 50, c = colors, marker = 'o', edgecolors='k', zorder=10)
     text_energy = ax.text(0.02, 0.90, '', transform=ax.transAxes, fontweight='bold')
@@ -660,13 +671,12 @@ if __name__ == "__main__":
     bf_model = BeamformingModel(array)
     plotter = BeamformingPlot(bf_model)
 
-    f = 5 * np.logspace(1, 2, num = 10)
+    f = np.logspace(np.log10(20), np.log10(500), num = 10) # generic frequencies (used in optimization)
     hpbw = np.zeros((len(f), 3))
     di = np.zeros(len(f))
     msll = np.zeros(len(f))
     for i, freq in enumerate(f):
         di[i], (hpbw[i,0], hpbw[i,1], hpbw[i,2]), msll[i] = bf_model.get_beamforming_performance_measures(frequency=freq)
-        az, de, bp = bf_model.compute_beampattern(frequency=freq, shading_method='uniform')
 
     fig, ax = plt.subplots(1, 3, figsize=(15, 5))
     ax[0].plot(f, di)
@@ -695,6 +705,6 @@ if __name__ == "__main__":
 
     fig, ax = plt.subplots()
     
-    array.plot_array_connections(fig, ax, f=f)
+    array.plot_array_connections(fig, ax, f=f, c = 1460)
 
     plt.show()

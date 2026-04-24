@@ -161,4 +161,5 @@ class BeamformingArray:
                 iter += 1
 
         ax.scatter(self.Y, self.Z, c = 'k', marker = 'o')
+        ax.set_aspect('equal')
         ax.legend()
