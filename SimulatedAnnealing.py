@@ -189,8 +189,9 @@ class SAOptimization:
         deltas = []
         num_samples = 20
         current_state = self.state 
+        scaling = self.search_scaling_func(self.state, self.state_inc)
         for _ in range(num_samples):
-            perturbation = np.random.standard_cauchy(size=self.ndim) * self.state_inc
+            perturbation = np.random.standard_cauchy(size=self.ndim) * self.state_inc * scaling
             test_state = current_state + perturbation
             test_state = np.clip(test_state, self.state_lims[0], self.state_lims[1])         
             test_energy = self.log_distortion(self.call_function(test_state))
@@ -213,6 +214,8 @@ class SAOptimization:
         # - other temperature-related variables
         self.temperature = self.temperature_0.copy()
         self.temperature_history = np.array([self.temperature])
+        self.temperature_base = 0.98
+        self.temperature_base_ref = 0.95
         self.sensitivity = self.get_sensitivity(self.log_distortion, self.call_function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
         self.function_calls += 1
 
@@ -221,8 +224,8 @@ class SAOptimization:
         self.base_reanneal_limit = 10 * self.ndim
         self.reanneal_limit = self.base_reanneal_limit
         self.volatility_ratio = 1
-        self.energy_window = deque(maxlen=200)
-        self.energy_attempt_window = deque(maxlen=200)
+        self.energy_window = deque(maxlen=5*self.ndim)
+        self.energy_attempt_window = deque(maxlen=5*self.ndim)
         self.r = [0]
         self.function_calls_since_min = 0
         self.momentum_scaling = 1.0
@@ -308,6 +311,7 @@ class SAOptimization:
                 
                 # TODO: - Potentially switch to a linear scaling with k
                 self.temperature = self.temperature_0 / (np.log(1 + self.k)) # new temperature
+                # self.temperature = self.temperature * self.temperature_base ** self.k
                 
                 gamma = 0.5
                 temp_ratio = (self.temperature/self.temperature_0) ** gamma
@@ -374,7 +378,9 @@ class SAOptimization:
                     self.proposed_states += 1
 
                 if self.proposed_states > self.window_length:
-                    self.adaptive_scaling = 0.85 + 0.15 * ((self.num_accepted / self.proposed_states) / self.target_ratio) # [0.85 -> 3.1]
+                    mean_prob = np.exp(np.mean(self.energy_attempt_window)/np.max(self.temperature))
+                    scaling_base = 0.5
+                    self.adaptive_scaling = scaling_base + (1-scaling_base) * (mean_prob / self.target_ratio) # [0.5 -> 3]
                     self.proposed_states = 0
                     self.num_accepted = 0
 
@@ -419,6 +425,8 @@ class SAOptimization:
                     self.volatility_ratio = energy_std / (np.abs(energy_mean) + 1e-6)
                     self.reanneal_limit = int(self.base_reanneal_limit * (self.volatility_ratio))
                     self.reanneal_limit = np.clip(self.reanneal_limit, self.ndim, 100 * self.ndim)
+                    sigmoid_volatility = 1/(1 + np.exp(-self.volatility_ratio))
+                    self.temperature_base = self.temperature_base_ref + (1 - self.temperature_base_ref)*self.volatility_ratio
 
                 self.accepted_energies = np.append(self.accepted_energies, [self.energy])
                 self.temperature_history = np.append(self.temperature_history, [self.temperature], axis = 0)
@@ -453,12 +461,10 @@ class SAOptimization:
                 cutoff = len(self.state) // 2 + 1
 
                 pbar.set_postfix({
-                    "reanneal_limit": "{:d}".format(self.reanneal_limit),
-                    "volatility_ratio": " {:.3f} / {:.3f} = {:.3f}".format(np.std(self.energy_window), np.mean(self.energy_window), self.volatility_ratio),
-                    "function_calls": "{:d}".format(self.function_calls),
+                    "volatility": " {:.3f} / {:.3f} = {:.3f}".format(np.std(self.energy_window), np.mean(self.energy_window), self.volatility_ratio),
                     "metropolis_avg": "{:.4f}".format(np.exp(np.mean(self.energy_attempt_window)/np.max(self.temperature))),
-                    "k": np.array2string(self.k[:4], precision=1, separator=','),
-                    "Best": "{:.10f}".format(self.global_min_energy),
+                    "k": "{:.2e}".format(np.max(self.k)),
+                    "Best": "{:.3e}".format(self.global_min_energy),
                 })
 
                 self.k_list = np.append(self.k_list, [self.k], axis = 0)

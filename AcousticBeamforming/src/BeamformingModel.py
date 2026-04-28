@@ -496,7 +496,7 @@ class BeamformingPlot:
             # 2. Plot using the new radial mesh
             im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', vmin=-20, vmax=0, cmap='turbo')
             
-            fig.colorbar(im, ax=ax, label='Beamforming Gain (dB)')
+            fig.colorbar(im, ax=ax, label='Normalized Gain (dB)')
             
             # Ensure contour uses the same transformed mesh
             ax.contour(AZ_MESH, R_MESH, beampattern, levels=[-3], colors='red', linewidths=2)
@@ -602,7 +602,7 @@ if __name__ == "__main__":
     # Y = np.array([np.float64(0.0), np.float64(0.13), np.float64(-0.14), np.float64(-0.17), np.float64(-0.72), np.float64(-0.92), np.float64(-1.39), np.float64(-1.77), np.float64(-2.13), np.float64(-2.1), np.float64(-2.41), np.float64(-2.35), np.float64(-2.44), np.float64(-2.47), np.float64(-2.48), np.float64(-2.06)])
     # Z = np.array([np.float64(0.0), np.float64(-0.42), np.float64(-0.6), np.float64(-0.68), np.float64(-0.65), np.float64(-0.68), np.float64(-0.95), np.float64(-1.01), np.float64(-1.46), np.float64(-1.91), np.float64(-1.88), np.float64(-2.39), np.float64(-2.52), np.float64(-3.03), np.float64(-3.35), np.float64(-3.5)])
 
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260424-132647.npz'))
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260427-150406.npz'))
     coords = opt_data['arr_0']
     accepted_states = opt_data['arr_1']
     accepted_energies = opt_data['arr_2']

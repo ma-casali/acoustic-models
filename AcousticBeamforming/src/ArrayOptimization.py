@@ -116,9 +116,9 @@ def objective_function_slow(state, optimal_state = False, penalty_start = 6):
 
     coords = np.round(coords, decimals = 2) # round to 2 decimals to align with centimeter spaced grid
 
-    f = np.logspace(np.log10(10), np.log10(100), num = 3) # generic frequencies (used in optimization)
-    f_1 = np.random.uniform(f[0]*1.05, f[0]*0.95, size = 1)
-    f_2 = np.random.uniform(f[1]*1.05, f[2]*0.95, size = 1)
+    f = np.floor(np.logspace(np.log10(50), np.log10(200), num = 3)) # generic frequencies (used in optimization)
+    f_1 = np.random.choice(np.arange(f[0]+1, f[1], 1), size = 1) # don't need more resolution than 1 Hz. 
+    f_2 = np.random.choice(np.arange(f[1]+1, f[2], 1), size = 1) # this should allow for ~100 function calls to cover the whole frequency range
     f = np.concatenate(([f[0]], f_1, [f[1]], f_2, [f[2]])) # add some randomization to the frequencies used in optimization to avoid overfitting to specific frequencies
 
     steer_de = np.radians(np.arange(0, 90, 10))
@@ -250,20 +250,20 @@ def search_scaling(state, state_inc):
 if __name__ == "__main__":
     np.random.seed(13)
 
-    num_elements = 13
+    num_elements = 21
 
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
     save_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_'+now)
 
-    d_min = 1460 / 100 / 2 # half wavelength at 60 Hz
-    d_max = 1460 / 10 / 2 # half wavelength at 20 Hz
+    d_min = 1460 / 200 / 2 # half wavelength at 60 Hz
+    d_max = 1460 / 50 / 2 # half wavelength at 20 Hz
 
     d_lims = np.tile([[d_min, d_max - 0.01]], (num_elements-1, 1)) # make sure an element point isn't rounded above d_max
     theta_lims = np.tile([[np.radians(0), np.radians(359.5)]], (num_elements-2, 1))
     theta_lims[0,:] = [np.radians(0), np.radians(180)] # limit the angle from the second element to avoid symmetric duplicates of the same array geometry
 
     d_inc = np.tile(d_min / 5, num_elements-1)
-    th_inc = np.tile(np.radians(0.5), num_elements-2)
+    th_inc = np.tile(np.radians(30), num_elements-2)
 
     d_0 = np.random.uniform(d_lims[:, 0], d_lims[:, 1], size = num_elements-1)
     th_0 = np.random.uniform(theta_lims[:, 0], theta_lims[:, 1], size = num_elements-2) # element 2 is always on y-axis

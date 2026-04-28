@@ -8,7 +8,7 @@ from BeamformingArray import BeamformingArray, ElementDirectivity
 from ArrayShading import ArrayShading
 
 # initialize model
-opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260424-132647.npz'))
+opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260427-150406.npz'))
 coords = opt_data['arr_0']
 accepted_states = opt_data['arr_1']
 accepted_energies = opt_data['arr_2']
