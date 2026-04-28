@@ -2,9 +2,11 @@ from matplotlib import style
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import matplotlib.cm as cm
 from matplotlib.animation import FuncAnimation
 import os
+import networkx as nx
 from sklearn.neighbors import NearestNeighbors
 from matplotlib.animation import FuncAnimation
 from matplotlib.path import Path
@@ -303,14 +305,34 @@ class BeamformingModel:
         """
         Computation of cutoff frequencies for each element for a low-pass filter, based off distance to closest neighbor
         """
-        coords = np.column_stack((self.array.X, self.array.Y, self.array.Z)) # shape (num_elements, 3)
-        nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
-        distances, _ = nbrs.kneighbors(coords)
 
-        if np.any(distances[:, 1] == 0):
-            raise ValueError("Two elements are in the same location, which will cause a division by zero in the cutoff frequency calculation. Please ensure all elements have unique positions.")
+        def get_aperture_size(nodes):
+            if len(nodes) < 2: return 0
+            subset_points = points[list(nodes)]
+            return np.max(scipy.spatial.distance.pdist(subset_points, metric='cityblock'))
+        
+        n = len(self.array.X)
+        points = np.column_stack((self.array.X, self.array.Y, self.array.Z))
+        dist_matrix = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(points))
+        unique_distances = np.sort(np.unique(dist_matrix))
 
-        cutoff_frequencies = self.c / (2 * distances[:, 1]) # cutoff frequency is c / (2 * d), where d is the distance to the closest neighbor
+        cutoff_frequencies = np.zeros(len(self.array.X))
+        # start from smallest d so that points in multiple subarrays have lowest cutoff
+        for d in np.flip(unique_distances): 
+            if d == 0: d = 0.01 - 1e-6
+            # points will be connected if their mutual distance <= d
+            # a graph is created with edges between points where distance <= d
+            G = nx.Graph()
+            G.add_nodes_from(range(n))
+
+            rows, cols = np.where((dist_matrix <= d))
+            edges = zip(rows, cols)
+            G.add_edges_from(edges)
+
+            subarrays = list(nx.connected_components(G))
+            largest_subarray = max(subarrays, key=get_aperture_size) # largest by points
+
+            cutoff_frequencies[np.array(list(largest_subarray))] = 2 * self.c / d
 
         return cutoff_frequencies
     
@@ -465,7 +487,7 @@ class BeamformingPlot:
 
         plt.show()
 
-    def plot_beampattern_image(self, az, de, beampattern, method = 'rectangular'):
+    def plot_beampattern_image(self, frequency, az, de, beampattern, method = 'rectangular'):
 
         assert method in ['rectangular', 'polar'], "Method must be either 'rectangular' or 'polar'"
 
@@ -482,19 +504,43 @@ class BeamformingPlot:
                                 aspect='auto', origin='lower', vmin = -50, vmax = 0, cmap = 'turbo')
             fig.colorbar(im, ax=ax, label='Beamforming Gain (dB)')
             ax.contour(beampattern.T,
-                        levels=[-3], colors='red',
+                        levels=[-3], colors='white',
                             extent=(np.degrees(np.min(az)), np.degrees(np.max(az)), np.degrees(np.min(de)), np.degrees(np.max(de))), linewidths=2)
             ax.set_xlabel('Azimuth (degrees)')
             ax.set_ylabel('Elevation (degrees)')
 
         if method == 'polar':
-            fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
-            
+            # 1. Define the layout
+            # We create a 3x3 (or similar) grid logic. 
+            # 'A' is the Array geometry, 'P' is the Polar beampattern.
+            # The list-of-lists represents the visual arrangement.
+            layout = [
+                ['array', '.',     '.'],
+                ['.',     'polar', 'polar'],
+                ['.',     'polar', 'polar'],
+                ['.',     'polar', 'polar']
+            ]
+
+            fig, ax_dict = plt.subplot_mosaic(
+                layout,
+                per_subplot_kw={
+                    'polar': {'projection': 'polar'} # Only the beampattern is polar
+                },
+                figsize=(10, 8)
+            )
+
+            # Alias our axes for clarity
+            ax = ax_dict['polar']
+            ax_geom = ax_dict['array']
+
+            # --- BEAMPATTERN PLOT (Your existing logic) ---
             R_COORD = de
             AZ_MESH, R_MESH = np.meshgrid(az, R_COORD, indexing='ij')
 
-            # 2. Plot using the new radial mesh
-            im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', vmin=-20, vmax=0, cmap='turbo')
+            cmap = mpl.cm.turbo
+            bounds = np.arange(-21, 3, 3)
+            norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='min')
+            im = ax.pcolormesh(AZ_MESH, R_MESH, beampattern, shading='auto', cmap=cmap, norm=norm)
             
             fig.colorbar(im, ax=ax, label='Normalized Gain (dB)')
             
@@ -504,20 +550,19 @@ class BeamformingPlot:
             # 3. Fix the labels so the user still sees "Elevation" values
             ax.set_theta_zero_location('N')
             ax.set_theta_direction(-1)
-            
-            # Radial limits: 0 at center, 90 at edge
             ax.set_rlim(0, np.radians(90))
             
-            # Map radial positions [0, 30, 60, 90] to Elevation labels [0, 30, 60, 90]
-            # Note: center (radius 0) is now 0° elevation
             ticks = np.radians([0, 30, 60, 90])
             ax.set_rticks(ticks)
-            ax.set_yticklabels(['0°', '30°', '60°', '90°'])
-            
+            ax.set_yticklabels(['0°', '30°', '60°', '90°'], fontweight='bold', fontsize=8)
             ax.set_xlabel('Azimuth (degrees)')
-            # Position the label so it doesn't overlap
-            ax.yaxis.set_label_coords(0.5, 1.1) 
-            ax.set_ylabel('Elevation (degrees)')
+
+            # --- ARRAY GEOMETRY PLOT (The new addition) ---
+            # Plotting X and Y coordinates (assuming Z is uniform or ignored for the 2D footprint)
+            element_mask = frequency < self.bf_model.compute_cutoff_frequencies()
+            self.bf_model.array.plot_array_geometry(ax = ax_geom, projection = '2d', element_mask=element_mask)
+
+            plt.tight_layout()
 
     def plot_beampattern_slice(self, ax, az, de, beampattern, slice_az = None, slice_de = None, label_text: str = '', style: str = 'polar'):
         

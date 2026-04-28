@@ -92,25 +92,39 @@ class BeamformingArray:
         else:
             raise ValueError("Invalid element directivity type")
         
-    def plot_array_geometry(self):
-        fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
-        ax.scatter(self.X, self.Y, self.Z, c='b', marker='o')
+    def plot_array_geometry(self, fig = None, ax = None, projection = None, element_mask = None):
+        if fig is None and ax is None:
+            fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
 
-        # get maximum dimension of the array for scaling the vectors
-        max_dim = np.max(np.sqrt(self.X**2 + self.Y**2 + self.Z**2))
-        vector_length = max_dim * 0.1 # scale the vectors to be 10% of the maximum dimension of the array
+        if projection == None:
+            ax.scatter(self.X, self.Y, self.Z, c='b', marker='o')
 
-        ax.quiver(self.X, self.Y, self.Z, self.eX[:, 0], self.eX[:, 1], self.eX[:, 2], length=vector_length, color='r', label='eX')
-        ax.quiver(self.X, self.Y, self.Z, self.eY[:, 0], self.eY[:, 1], self.eY[:, 2], length=vector_length, color='g', label='eY')
-        ax.quiver(self.X, self.Y, self.Z, self.eZ[:, 0], self.eZ[:, 1], self.eZ[:, 2], length=vector_length, color='b', label='eZ')
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_zlabel('Z (m)')
-        ax.set_title('Array Geometry')
+            # get maximum dimension of the array for scaling the vectors
+            max_dim = np.max(np.sqrt(self.X**2 + self.Y**2 + self.Z**2))
+            vector_length = max_dim * 0.1 # scale the vectors to be 10% of the maximum dimension of the array
 
-        ax.set_xlim(min(np.min(self.X), -max_dim), max(np.max(self.X), max_dim))
-        ax.set_ylim(min(np.min(self.Y), -max_dim), max(np.max(self.Y), max_dim))
-        ax.set_zlim(min(np.min(self.Z), -max_dim), max(np.max(self.Z), max_dim))
+            ax.quiver(self.X, self.Y, self.Z, self.eX[:, 0], self.eX[:, 1], self.eX[:, 2], length=vector_length, color='r', label='eX')
+            ax.quiver(self.X, self.Y, self.Z, self.eY[:, 0], self.eY[:, 1], self.eY[:, 2], length=vector_length, color='g', label='eY')
+            ax.quiver(self.X, self.Y, self.Z, self.eZ[:, 0], self.eZ[:, 1], self.eZ[:, 2], length=vector_length, color='b', label='eZ')
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
+            ax.set_zlabel('Z (m)')
+            ax.set_title('Array Geometry')
+
+            ax.set_xlim(min(np.min(self.X), -max_dim), max(np.max(self.X), max_dim))
+            ax.set_ylim(min(np.min(self.Y), -max_dim), max(np.max(self.Y), max_dim))
+            ax.set_zlim(min(np.min(self.Z), -max_dim), max(np.max(self.Z), max_dim))
+
+        if projection == '2d':
+            if element_mask is None:
+                element_mask = np.ones_like(self.array.X, dtype=bool)
+        
+            ax.scatter(self.Y[element_mask], self.Z[element_mask], c='b', marker='o')
+            ax.set_aspect('equal')
+            ax.set_title('Array Geometry', fontsize=10)
+            ax.set_xticks([]) 
+            ax.set_yticks([])
+    
 
     def plot_array_connections(self, fig = None, ax = None, f = None, c = None):
 

@@ -192,14 +192,14 @@ def objective_function_slow(state, optimal_state = False, penalty_start = 6):
         di_f = np.zeros(len(f))
         msll_f = np.zeros(len(f))
         for i in range(len(f)):
-            di_f[i], _, msll_f[i] = bf_model.get_beamforming_performance_measures(frequency=f[i], delta_az = 10, delta_de = 2)
+            di_f[i], _, msll_f[i] = bf_model.get_beamforming_performance_measures(frequency=f[i], delta_az = 10, delta_de = 2, use_primary_filter=True)
             msll_f[i] = min(-1, msll_f[i])
 
         
         di_de = np.zeros(len(steer_de))
         msll_de = np.zeros(len(steer_de))
         for i in range(len(steer_de)):
-            di_de[i], _, msll_de[i] = bf_model.get_beamforming_performance_measures(frequency=44, delta_az = 10, delta_de = 2, steer_de=np.array([[steer_de[i]]]))
+            di_de[i], _, msll_de[i] = bf_model.get_beamforming_performance_measures(frequency=44, delta_az = 10, delta_de = 2, steer_de=np.array([[steer_de[i]]]), use_primary_filter=True)
             msll_de[i] = min(-1, msll_de[i])
 
     # want to optimize the following items (in order of importance):
