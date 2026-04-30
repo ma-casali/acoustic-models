@@ -88,6 +88,7 @@ class BeamformingModel:
         self.array = array
         self.shading_model = ArrayShading(array)
         self.c = c # speed of sound in m/s
+        self.compute_active_elements()
 
     def compute_steering_vector(self, steer_az: np.ndarray, steer_de: np.ndarray, frequency: float) -> np.ndarray:
 
@@ -180,8 +181,13 @@ class BeamformingModel:
         AZ, DE = np.meshgrid(az, de, indexing = 'ij')
 
         if use_primary_filter:
-            cutoff_frequencies = self.compute_cutoff_frequencies() # shape (num_elements,)
-            element_mask = frequency < cutoff_frequencies
+            if frequency > self.f_cutoff[0]:
+                raise ValueError("The freuqency is above the low-pass cutoff for the beamformer")
+            elif frequency < self.f_cutoff[-1]:
+                element_mask = np.ones_like(self.array.X, dtype = bool)
+            else:
+                band_id = np.where((frequency < self.f_cutoff[:-1]) & (frequency > self.f_cutoff[1:]))[0][0]
+                element_mask = self.active_elements[:, band_id].flatten()
         else:
             element_mask = np.ones(len(self.array.X), dtype=bool)
 
@@ -300,7 +306,7 @@ class BeamformingModel:
 
         return w_opt, res.cost, res.message
     
-    def compute_cutoff_frequencies(self):
+    def compute_active_elements(self):
 
         """
         Computation of cutoff frequencies for each element for a low-pass filter, based off distance to closest neighbor
@@ -316,15 +322,18 @@ class BeamformingModel:
         dist_matrix = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(points))
         unique_distances = np.sort(np.unique(dist_matrix))
 
-        cutoff_frequencies = np.zeros(len(self.array.X))
-        # start from smallest d so that points in multiple subarrays have lowest cutoff
-        for d in np.flip(unique_distances): 
-            if d == 0: d = 0.01 - 1e-6
-            # points will be connected if their mutual distance <= d
-            # a graph is created with edges between points where distance <= d
-            G = nx.Graph()
-            G.add_nodes_from(range(n))
+        # each element has one or more active bands
+        unique_distances[unique_distances < 0.01] = 0.01 - 1e-6
+        self.f_cutoff = self.c / (2 * unique_distances) # sorted from highest to lowest
+        self.active_elements = np.full((n, len(self.f_cutoff)-1), False)
 
+        G = nx.Graph()
+        G.add_nodes_from(range(n))
+
+        for band_id in range(len(self.f_cutoff) - 1): 
+
+            d = unique_distances[band_id + 1] # the larger separation
+            # pick up any points with neighbors closer than the larger separation for the band
             rows, cols = np.where((dist_matrix <= d))
             edges = zip(rows, cols)
             G.add_edges_from(edges)
@@ -332,9 +341,9 @@ class BeamformingModel:
             subarrays = list(nx.connected_components(G))
             largest_subarray = max(subarrays, key=get_aperture_size) # largest by points
 
-            cutoff_frequencies[np.array(list(largest_subarray))] = 2 * self.c / d
+            self.active_elements[np.array(list(largest_subarray)), band_id] = True
 
-        return cutoff_frequencies
+        return self.f_cutoff, self.active_elements
     
     def get_beamforming_performance_measures(self, delta_az = 0.25, delta_de = 0.25, steer_az = np.array([[0]]), steer_de = np.array([[0]]), frequency: float = None, c: float = 343, use_primary_filter = False):
 
@@ -544,22 +553,24 @@ class BeamformingPlot:
             
             fig.colorbar(im, ax=ax, label='Normalized Gain (dB)')
             
-            # Ensure contour uses the same transformed mesh
-            ax.contour(AZ_MESH, R_MESH, beampattern, levels=[-3], colors='red', linewidths=2)
-
-            # 3. Fix the labels so the user still sees "Elevation" values
             ax.set_theta_zero_location('N')
             ax.set_theta_direction(-1)
             ax.set_rlim(0, np.radians(90))
             
             ticks = np.radians([0, 30, 60, 90])
             ax.set_rticks(ticks)
-            ax.set_yticklabels(['0°', '30°', '60°', '90°'], fontweight='bold', fontsize=8)
+            ax.set_yticklabels(['el=0°', 'el=30°', 'el=60°', 'el=90°'], fontweight='bold', fontsize=8)
             ax.set_xlabel('Azimuth (degrees)')
 
             # --- ARRAY GEOMETRY PLOT (The new addition) ---
             # Plotting X and Y coordinates (assuming Z is uniform or ignored for the 2D footprint)
-            element_mask = frequency < self.bf_model.compute_cutoff_frequencies()
+            if frequency > self.bf_model.f_cutoff[0]:
+                raise ValueError("The freuqency is above the low-pass cutoff for the beamformer")
+            elif frequency < self.bf_model.f_cutoff[-1]:
+                element_mask = np.ones_like(self.bf_model.array.X, dtype = bool)
+            else:
+                band_id = np.where((frequency < self.bf_model.f_cutoff[:-1]) & (frequency > self.bf_model.f_cutoff[1:]))[0][0]
+                element_mask = self.bf_model.active_elements[:, band_id].flatten()
             self.bf_model.array.plot_array_geometry(ax = ax_geom, projection = '2d', element_mask=element_mask)
 
             plt.tight_layout()

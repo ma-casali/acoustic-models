@@ -174,6 +174,7 @@ class SAOptimization:
         self.search_scaling_func = search_scaling_func if search_scaling_func is not None else self.default_search_scaling_func
 
         # energy variables
+        self.penalty_log = []
         self.energy_reference = None
         self.energy = self.log_distortion(self.call_function(self.state))
         self.state_list[tuple(self.state)] = self.energy
@@ -203,7 +204,7 @@ class SAOptimization:
 
         if len(deltas) > 0:
             avg_delta = np.mean(deltas)
-            t0_val = -avg_delta / np.log(0.90) 
+            t0_val = -avg_delta / np.log(0.9) 
         else:
             t0_val = np.mean(self.state_inc) * 0.1
 
@@ -248,6 +249,7 @@ class SAOptimization:
         self.proposed_states = 0
         self.num_accepted = 0
         self.num_accepted_total = 0
+        self.acceptance_ratio_list = []
 
     def rosenbrock(self, x):
         return np.sum(100*(x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2, axis = 0)
@@ -265,8 +267,10 @@ class SAOptimization:
         with distortion applied to the energy values to smooth the landscape and make it easier to optimize.
         """
 
-        x_prime = np.zeros((np.size(dx), np.size(dx)))
-        np.fill_diagonal(x_prime, x + dx)  
+        x_prime = np.tile(x, (len(x), 1))
+        diag = x + dx
+        diag[diag > lims[1, :]] = x[diag > lims[1, :]] - dx[diag > lims[1, :]]
+        np.fill_diagonal(x_prime, diag)  
         y_prime = np.zeros_like(x, dtype = np.float64)
         for i1 in range(np.shape(x_prime)[0]):
             if tuple(x_prime[i1]) in self.state_list:
@@ -287,14 +291,24 @@ class SAOptimization:
     
     def call_function(self, x):
         if self.energy_reference is None:
-            return self.function(x)
+            penalty_array = self.function(x)
         else:
-            return self.function(x, penalty_start = self.energy_reference)
+            penalty_array = self.function(x, penalty_start = self.energy_reference)
+
+        if len(penalty_array) > 1:
+            # penalty components are saved 
+            self.penalty_log.append(penalty_array)
+            penalty = np.sum(penalty_array)
+        else:
+            penalty = penalty_array
+        
+        return penalty
 
     def optimize(self, max_steps = np.inf, min_tol = 1e-6):
 
         tqdm.tqdm.write('Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+' and initial energy: {:.3f}'.format(self.energy))
         update_val_old = 0
+        acceptance_ratio = 1
         with tqdm.tqdm(total = 100, desc = "Annealing") as pbar:
             iterations = 0
             while self.r[-1] < 2 * self.ndim and iterations < max_steps:
@@ -378,11 +392,13 @@ class SAOptimization:
                     self.proposed_states += 1
 
                 if self.proposed_states > self.window_length:
-                    mean_prob = np.exp(np.mean(self.energy_attempt_window)/np.max(self.temperature))
-                    scaling_base = 0.5
-                    self.adaptive_scaling = scaling_base + (1-scaling_base) * (mean_prob / self.target_ratio) # [0.5 -> 3]
+                    acceptance_ratio = self.num_accepted / self.proposed_states
+                    dynamic_target = self.target_ratio * (1 + self.volatility_ratio)
+                    self.adaptive_scaling *= acceptance_ratio / dynamic_target
+                    self.adaptive_scaling = np.clip(self.adaptive_scaling, 0.1, 2.0)
                     self.proposed_states = 0
                     self.num_accepted = 0
+                    self.acceptance_ratio_list.append(acceptance_ratio)
 
                 # if the number of accepted states has reached the reanneal limit, commence reannealing
                 if self.num_accepted_total == self.reanneal_limit or iter == self.reanneal_limit: 
@@ -408,7 +424,9 @@ class SAOptimization:
                     if self.iter_since_energy_loss > (10 * self.ndim):
                         self.k += self.ndim
                     else:
-                        self.k += 2
+                        acceptance_factor = (self.num_accepted / self.proposed_states) / self.target_ratio if self.proposed_states > self.window_length else 1.0
+                        volatility_damping = 1.0 / (1.0 + self.volatility_ratio)
+                        self.k += np.clip(2.0 * acceptance_factor * volatility_damping, 0.1, self.ndim)
 
                     self.energy = energy_new
                     self.state = state_candidate
@@ -462,7 +480,7 @@ class SAOptimization:
 
                 pbar.set_postfix({
                     "volatility": " {:.3f} / {:.3f} = {:.3f}".format(np.std(self.energy_window), np.mean(self.energy_window), self.volatility_ratio),
-                    "metropolis_avg": "{:.4f}".format(np.exp(np.mean(self.energy_attempt_window)/np.max(self.temperature))),
+                    "accept ratio ": "{:.4f}".format(acceptance_ratio),
                     "k": "{:.2e}".format(np.max(self.k)),
                     "Best": "{:.3e}".format(self.global_min_energy),
                 })
@@ -477,7 +495,7 @@ class SAOptimization:
 
         tqdm.tqdm.write(f"Optimization Complete. Global Min: {self.global_min_energy:.3f}")
 
-        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, self.proposed_states
+        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, self.proposed_states, self.penalty_log
 
     def plot_results(self):
 
@@ -488,10 +506,11 @@ class SAOptimization:
         axs[0].set_ylabel('Energy')
         axs[0].scatter(np.where(self.accepted_energies == self.global_min_energy)[0][0], self.global_min_energy, marker = 'x', c ='r')  
         
-        axs[1].plot(self.accepted_states)
+        axs[1].plot(self.acceptance_ratio_list)
+        axs[1].axhline(self.target_ratio)
         axs[1].grid(True)
-        axs[1].set_xlabel('Iteration')
-        axs[1].set_ylabel('states')
+        axs[1].set_ylabel('Acceptance Ratio')
+        axs[1].set_ylim([0, 1])
 
         axs[2].plot(self.k_list)
         axs[2].grid(True)

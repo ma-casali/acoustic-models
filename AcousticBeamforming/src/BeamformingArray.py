@@ -122,10 +122,7 @@ class BeamformingArray:
             ax.scatter(self.Y[element_mask], self.Z[element_mask], c='b', marker='o')
             ax.set_aspect('equal')
             ax.set_title('Array Geometry', fontsize=10)
-            ax.set_xticks([]) 
-            ax.set_yticks([])
     
-
     def plot_array_connections(self, fig = None, ax = None, f = None, c = None):
 
         if fig is None or ax is None:
