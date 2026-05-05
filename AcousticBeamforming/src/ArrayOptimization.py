@@ -20,62 +20,92 @@ from SimulatedAnnealing import SAOptimization, SAParallel
 
 def objective_function_fast(state, optimal_state = False):
 
+    """
+    Description of objective functions:
+
+    These objective functions rely heavily on the concept of "subarrays". These subarrays are
+    subsets of elements within the larger collection of elements that are active for any given 
+    frequency band. This concept is important, as only certain subarrays will be active for a 
+    given frequency in order to reduce spatial aliasing due to over-large distances. 
+
+    1. Total Size Penalty: this function attempts to minimize the city-block size of the array. 
+        This comes mostly from a need from a logistical standpoint for the array to be the 
+        smallest possible.
+    2. Count Penalty: this function attempts to maximize the count and frequency of the median 
+        frequency subarray. This assumes that doing so will help to maximize the amount of 
+        elements per subarray while disincentivizing small-grouped arrays. 
+    3. Min. Aperture Penalty: This function attempts to maximize the size of each subarray's 
+        aperture for the design frequency of that subarray. It does so by raising the floor. 
+    4. Frequency Density Penalty: This function attempts to standardize the array so that each
+        subarray has equivalent coverage, meaning that there are similar amounts of pairs of 
+        elements from one subarray to another. 
+
+    Each penalty is normalized to have absolute limits from 0 to 1. This helps with temperature scaling when using simulated annealing. 
+    """
+
     def get_aperture_size(nodes):
+        # measure city-block size of sub-arrays
         if len(nodes) < 2: return 0
         subset_points = points[list(nodes)]
         return np.max(scipy.spatial.distance.pdist(subset_points, metric='cityblock'))
     
+    # constants
     c = 1460 # m/s
     f_hi = 100 # Hz
     f_lo = 20 # Hz
+    df = 10 # Hz
     
+    # calculation of point coordinates from state
     n = len(state) // 2 + 2
     coords = np.zeros((num_elements, 2), dtype=np.float32)
     coords[1, :] = [0, state[0]] # place the second element on the y-axis to break symmetry and reduce the search space
-    
     curr_angle = 0
     for i in range(2, num_elements):
         curr_angle += state[(num_elements - 1)+ (i - 2)]
         coords[i, 0] = coords[i-1, 0] + state[i-1] * np.cos(curr_angle)
         coords[i, 1] = coords[i-1, 1] + state[i-1] * np.sin(curr_angle)
-
     points = np.round(coords, decimals = 2) # round to 2 decimals to align with centimeter spaced grid
 
-    total_height = (np.max(points[:, 1]) - np.min(points[:, 1])) / (5 * c / f_lo / 2)
-    total_width = (np.max(points[:, 0]) - np.min(points[:, 0])) / (5 * c / f_lo / 2)
-
-    # 0 @ extremely small size, 1 @ infinite size, 0.5 at cityblock diagonal of 5 * max_spacing
+    # get total size and apply to penalty
+    total_height = (np.max(points[:, 1]) - np.min(points[:, 1])) / (c / f_lo / 2)
+    total_width = (np.max(points[:, 0]) - np.min(points[:, 0])) / (c / f_lo / 2)
     penalty_total_size = 2 / (1 + np.exp(-(total_height + total_width))) - 1
 
+    # determine unique distances and therefore all possible band-limits
     dist_matrix = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(points))
     unique_distances = np.sort(np.unique(dist_matrix)) 
-
-    # each element has one or more active bands
-    unique_distances[unique_distances < 0.01] = 0.01 - 1e-6
+    unique_distances = unique_distances[unique_distances >= 0.01]
     f_cutoff = c / (2 * unique_distances) # sorted from highest to lowest
+
+    # use distances to determine the evenness of frequency coverage across the band of interest
+    bins = c / (2 * np.arange(f_lo, f_hi + df, df)) # include right-most edge
+    bins = np.flip(bins) # monotonically increasing
+    d_hist, _ = np.histogram(unique_distances, bins=bins)
+    penalty_f_density = np.std(d_hist)/np.mean(d_hist)
+
+    # determine subarrays for each band
     active_elements = np.full((n, len(f_cutoff)-1), False)
-
-    # 0 at val = 1, 1 as val approaches infinity
-    penalty_f_range = 1 - (np.clip(f_cutoff[1], f_lo, f_hi) - np.clip(f_cutoff[-1], f_lo, f_hi))/(f_hi - f_lo)
-
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
-
     for band_id in range(len(f_cutoff) - 1): 
+        d = unique_distances[band_id + 1]
+        adj_matrix = (dist_matrix <= d).astype(int)
+        n_components, labels = scipy.sparse.csgraph.connected_components(csgraph=adj_matrix, directed=False)
+        
+        # find largest aperture size
+        best_aperture = -1
+        largest_subarray_mask = None
+        for label_id in range(n_components):
+            current_mask = (labels == label_id)
+            nodes = np.where(current_mask)[0]
+            ap_size = get_aperture_size(nodes)
+            
+            if ap_size > best_aperture:
+                best_aperture = ap_size
+                largest_subarray_mask = current_mask
 
-        d = unique_distances[band_id + 1] # the larger separation
-        # pick up any points with neighbors closer than the larger separation for the band
-        rows, cols = np.where((dist_matrix <= d))
-        edges = zip(rows, cols)
-        G.add_edges_from(edges)
-
-        subarrays = list(nx.connected_components(G))
-        largest_subarray = max(subarrays, key=get_aperture_size) # largest by points
-
-        active_elements[np.array(list(largest_subarray)), band_id] = True
+        active_elements[:, band_id] = largest_subarray_mask
 
     bands = active_elements.T 
-    unique_configs, first_occurrence, mapping = np.unique(bands, axis=0, return_index=True, return_inverse=True)
+    unique_configs, _, mapping = np.unique(bands, axis=0, return_index=True, return_inverse=True)
     unique_subarrays = unique_configs.T
 
     height_data = np.zeros(unique_subarrays.shape[1])
@@ -88,7 +118,7 @@ def objective_function_fast(state, optimal_state = False):
         count_array[i] = np.sum(unique_subarrays[:, i])
         
         f_lo = f_cutoff[np.where(mapping == i)[0][-1] + 1]
-        spacing = (c / f_lo) / 2
+        spacing = max(0.01, (c / f_lo) / 2)
 
         element_mask = unique_subarrays[:, i].flatten()
         selected_elements = points[element_mask]
@@ -100,24 +130,16 @@ def objective_function_fast(state, optimal_state = False):
 
     if np.all(height_data == 0):
         penalty_aperture_min = 1
-        penalty_aperture_balance = 1
     else:
         penalty_aperture_min = np.exp(-(np.min(height_data) + np.min(width_data))) # [1, 0]
-        penalty_aperture_balance = 2 / (1 + np.exp(-np.max(np.abs(np.array(height_data) - np.array(width_data))))) - 1 # [0, 1]
 
     if len(count_array) > 2:
         med_ind = np.argmin(np.abs(np.diff(count_array - np.mean(count_array)))) # round down
-        penalty_count = 1 - f_array[med_ind] / np.max(f_array) * count_array[med_ind] / np.max(count_array)
+        penalty_count = 1 - count_array[med_ind] / np.max(count_array) # * f_array[med_ind] / max(np.max(f_array), 1e-9)
     else:
         penalty_count = 1
 
-    penalty_aperture_variance = 2 / (1 + np.exp(-(np.std(height_data) + np.std(width_data)))) - 1 # [0, 1]
-    
-    # stds = np.array([2.78484950, 7.54512526e-1, 9.24490753e-1, 9.32192562e-4])
-    stds = np.ones(4)
-
-    return penalty_total_size/stds[0]*2, penalty_count/stds[1], penalty_aperture_min/stds[2], penalty_f_range/stds[3]
-
+    return np.array([penalty_total_size, penalty_count, penalty_aperture_min, penalty_f_density])
 
 def objective_function_slow(state, optimal_state = False, penalty_start = 6):
 
@@ -259,14 +281,21 @@ def search_scaling(state, state_inc):
     d = state[1:len(state) // 2 + 1]
     scaling = np.ones_like(state)
     r = d * np.cos(np.flip(np.cumsum(np.flip(theta))))
-    theta_inc_prime = np.abs(np.arctan(0.01 / (r + 1e-9)))
+    theta_inc_prime = np.abs(np.arctan(0.01 / (np.maximum(np.abs(r), 1e-6))))
     scaling[len(state) // 2 + 1:] = theta_inc_prime[-1] / theta_inc_prime
+
+    if not np.isfinite(scaling).all():
+        print("CRITICAL: Scaling contains non-finite values!")
+        print(f"r values: {r}")
+        print(f"theta_inc_prime: {theta_inc_prime}")
+        # Identify if the issue is a 0/0 or inf/inf case
 
     return scaling
 
 if __name__ == "__main__":
-    np.random.seed(13)
 
+    np.seterr(all='raise')
+    np.random.seed(13)
     num_elements = 25
 
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -305,14 +334,6 @@ if __name__ == "__main__":
     # opt.energy = opt.global_min_energy
     # opt.optimize()
 
-    fig, ax = plt.subplots()
-    penalty_log = np.array(opt.penalty_log)
-    sort_inds = np.argsort(penalty_log[:, 2])
-    for i in range(penalty_log.shape[1]):
-        ax.plot(penalty_log[sort_inds,i], label = f'penalty {i}')
-    ax.grid()
-    ax.legend()
-
     optimal_state = opt.global_min_state
 
     coords = np.zeros((num_elements, 2), dtype=np.float32)
@@ -327,7 +348,7 @@ if __name__ == "__main__":
     Z = coords[:, 1]
     plt.scatter(Y, Z)
 
-    np.savez(save_file, coords, opt.accepted_states, opt.accepted_energies, opt.global_min_energy, opt.penalty_log)
+    np.savez(save_file, coords, opt.accepted_states, opt.accepted_energies, opt.global_min_energy, opt.pareto_optimal_states, opt.pareto_optimal_values)
 
     opt.plot_results()
     plt.show()

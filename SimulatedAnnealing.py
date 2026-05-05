@@ -166,6 +166,7 @@ class SAOptimization:
             
         self.circular_inds = circular_inds if circular_inds is not None else np.full_like(self.state, False, dtype = bool)
             
+        # state related variables
         self.state_list = {}
         self.state_inc = state_inc if state_inc is not None else np.array([0.01]*self.ndim)
         self.state = np.int32(np.floor(self.state/self.state_inc))*self.state_inc # round initial state to nearest increment
@@ -174,13 +175,14 @@ class SAOptimization:
         self.search_scaling_func = search_scaling_func if search_scaling_func is not None else self.default_search_scaling_func
 
         # energy variables
-        self.penalty_log = []
         self.energy_reference = None
-        self.energy = self.log_distortion(self.call_function(self.state))
-        self.state_list[tuple(self.state)] = self.energy
+        self.energy_list = None
+        self.energy_vector, _ = self.call_function(self.state)
+        self.state_list[tuple(self.state)] = self.energy_vector
         self.function_calls += 1
-        self.energy_list = np.array([self.energy])
-        self.accepted_energies = np.array([self.energy])
+        self.accepted_energies = np.array([self.energy_vector])
+        self.ideal_vector = np.zeros_like(self.energy_vector)
+        self.nadir_vector = np.ones_like(self.energy_vector)
         
         # temperature variables
         self.k = 2*np.ones_like(self.state) # initial k
@@ -194,22 +196,22 @@ class SAOptimization:
         for _ in range(num_samples):
             perturbation = np.random.standard_cauchy(size=self.ndim) * self.state_inc * scaling
             test_state = current_state + perturbation
-            test_state = np.clip(test_state, self.state_lims[0], self.state_lims[1])         
-            test_energy = self.log_distortion(self.call_function(test_state))
+            test_state = np.clip(test_state, self.state_lims[0], self.state_lims[1])  
+            test_energy, _ = self.call_function(test_state)
+            delta_energy = (self.energy_vector - test_energy) # /np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
 
-            if test_energy > self.energy:
-                deltas.append(test_energy - self.energy)
+            if np.any(delta_energy > 0):
+                deltas.append(delta_energy)
             
             self.function_calls += 1
 
         if len(deltas) > 0:
-            avg_delta = np.mean(deltas)
+            avg_delta = np.mean(np.abs(deltas))
             t0_val = -avg_delta / np.log(0.9) 
         else:
             t0_val = np.mean(self.state_inc) * 0.1
 
         print(f"Starting temperature of {t0_val:.2e} due to avg delta of {(avg_delta if len(deltas) > 0 else 0):.2e} for avg. acceptance of 0.90")
-
         self.temperature_0 = t0_val * np.ones_like(self.state) # initial temperature
         
         # - other temperature-related variables
@@ -217,7 +219,7 @@ class SAOptimization:
         self.temperature_history = np.array([self.temperature])
         self.temperature_base = 0.98
         self.temperature_base_ref = 0.95
-        self.sensitivity = self.get_sensitivity(self.log_distortion, self.call_function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
+        self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
         self.function_calls += 1
 
         # meta-parameters
@@ -233,11 +235,11 @@ class SAOptimization:
         self.momentum = np.zeros_like(self.state)
 
         # tracking variables
-        self.iter_since_reanneal = 0
+        self.iter_since_reanneal = 1
         self.iter_since_energy_loss = 0
         self.reanneal_history = np.array(self.iter_since_reanneal)
         self.energy_loss_history = np.array(self.iter_since_energy_loss)
-        self.global_min_energy = self.energy
+        self.global_min_energy = self.energy_vector
         self.global_min_state = self.state
         self.search_list = np.array(self.state_space * self.state_inc)
         self.max_calls = max_calls if max_calls is not None else np.inf
@@ -259,8 +261,52 @@ class SAOptimization:
     
     def default_constraint(self, x):
         return True
+    
+    def pareto_optimality(self, x, new_energy_vector): 
+        # a state is 'Pareto Optimal' if: 
+        # 1. all objectives at that state are less than or equal to the same objective evaluated at any other state
+        # 2. at least one objective evaluated at the state is the minimum for that objective
 
-    def get_sensitivity(self, distortion_fun, fun, x, y, dx, x_list, lims):
+        if self.energy_list is None:
+            self.energy_list = np.array([np.ones_like(new_energy_vector)])
+            self.pareto_optimal_states = np.array([self.state])
+            self.pareto_optimal_values = np.array([np.ones_like(new_energy_vector)])
+            return True # non-dominated
+
+        condition1 = np.all(new_energy_vector >= self.energy_list, axis = 1)
+        condition2 = np.any(new_energy_vector > self.energy_list, axis = 1)
+
+        is_dominated = np.any(condition1 & condition2)
+
+        if not is_dominated: 
+            rev_condition1 = np.all(self.pareto_optimal_values >= new_energy_vector, axis = 1)
+            rev_condition2 = np.any(self.pareto_optimal_values > new_energy_vector, axis = 1)
+
+            rev_dominated = rev_condition1 & rev_condition2
+
+            self.pareto_optimal_states = self.pareto_optimal_states[~rev_dominated]
+            self.pareto_optimal_values = self.pareto_optimal_values[~rev_dominated]
+
+            if self.pareto_optimal_states.shape[0] == 0:
+                self.pareto_optimal_states = np.array([x])
+                self.pareto_optimal_values = np.array([new_energy_vector])
+            else:
+                self.pareto_optimal_states = np.vstack([self.pareto_optimal_states, x])
+                self.pareto_optimal_values = np.vstack([self.pareto_optimal_values, new_energy_vector])
+
+            # print(f"Replaced {np.sum(~(rev_condition1 & rev_condition2)):d} optimal state(s) with: ", new_energy_vector)
+            # print(f"{self.pareto_optimal_states.shape[0]:d} Pareto Optimal States")
+        else:
+            return False # dominated
+
+        # update nadir vector and ideal vector
+        if self.energy_list.shape[1] > 1:
+            self.ideal_vector = np.min(self.pareto_optimal_values, axis = 0)
+            self.nadir_vector = np.max(self.pareto_optimal_values, axis = 0)
+
+        return np.all(condition1 & condition2)
+
+    def get_sensitivity(self, fun, x, y, dx, x_list, lims):
 
         """
         Calculates the direction of the gradient of the energy function using a finite difference approximation,
@@ -271,14 +317,21 @@ class SAOptimization:
         diag = x + dx
         diag[diag > lims[1, :]] = x[diag > lims[1, :]] - dx[diag > lims[1, :]]
         np.fill_diagonal(x_prime, diag)  
-        y_prime = np.zeros_like(x, dtype = np.float64)
+        y_prime = np.zeros((len(x), len(self.energy_vector)), dtype = np.float64)
         for i1 in range(np.shape(x_prime)[0]):
             if tuple(x_prime[i1]) in self.state_list:
-                y_prime[i1] = self.state_list[tuple(x_prime[i1])]
+                y_prime[i1, :] = self.state_list[tuple(x_prime[i1])]
             else:
-                y_prime[i1] = distortion_fun(fun(x_prime[i1]))
+                y_prime[i1, :], _ = fun(x_prime[i1])
 
-        return (y_prime - y)/(np.diagonal(x_prime) - x) * np.ceil(np.diff(lims, axis = 0).flatten())
+        norm_diff = (y_prime - y)/np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+        norm_diff = np.sum(norm_diff, axis = 1)
+
+        if np.all(norm_diff == 0) or np.any(np.isnan(norm_diff)):
+            print(norm_diff)
+            raise ValueError("Problem with sensitivity")
+
+        return norm_diff/(np.diagonal(x_prime) - x) * np.ceil(np.diff(lims, axis = 0).flatten())
 
     def log_distortion(self, x, beta = 0.5):
         """
@@ -291,22 +344,17 @@ class SAOptimization:
     
     def call_function(self, x):
         if self.energy_reference is None:
-            penalty_array = self.function(x)
+            energy_array = self.function(x)
+            pareto_optimal = self.pareto_optimality(x, energy_array)
         else:
-            penalty_array = self.function(x, penalty_start = self.energy_reference)
+            energy_array = self.function(x, penalty_start = self.energy_reference)
+            pareto_optimal = self.pareto_optimality(x, energy_array)
 
-        if len(penalty_array) > 1:
-            # penalty components are saved 
-            self.penalty_log.append(penalty_array)
-            penalty = np.sum(penalty_array)
-        else:
-            penalty = penalty_array
-        
-        return penalty
+        return energy_array, pareto_optimal
 
     def optimize(self, max_steps = np.inf, min_tol = 1e-6):
 
-        tqdm.tqdm.write('Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+' and initial energy: {:.3f}'.format(self.energy))
+        tqdm.tqdm.write(f'Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+f' and initial energy: {self.energy_vector}')
         update_val_old = 0
         acceptance_ratio = 1
         with tqdm.tqdm(total = 100, desc = "Annealing") as pbar:
@@ -315,17 +363,17 @@ class SAOptimization:
 
                 # calculate momentum, the measure of how much the state is changing
                 # this will generally tell you how the algorithm is trending towards a minimum and in what direction
-                # momentum exists on a scale of 
-                if len(self.accepted_energies) >= 2:
+                if self.accepted_energies.shape[0] >= 2:
                     delta_state = np.diff(self.accepted_states[-2:,:], axis = 0).flatten()
-                    self.momentum[delta_state != 0] += np.diff(self.accepted_energies[-2:])/delta_state[delta_state != 0]
+                    delta_energy = np.diff(self.accepted_energies[-2:,:], axis = 0)[0]/np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+                    dominance_value = np.prod(delta_energy[delta_energy != 0])
+
+                    self.momentum[delta_state != 0] += dominance_value/delta_state[delta_state != 0]
                     self.momentum[delta_state == 0] += 0
                 else:
                     self.momentum += np.zeros_like(self.state)
                 
-                # TODO: - Potentially switch to a linear scaling with k
                 self.temperature = self.temperature_0 / (np.log(1 + self.k)) # new temperature
-                # self.temperature = self.temperature * self.temperature_base ** self.k
                 
                 gamma = 0.5
                 temp_ratio = (self.temperature/self.temperature_0) ** gamma
@@ -365,29 +413,38 @@ class SAOptimization:
                     key = tuple(state_candidate)
                     # see if computation was already done
                     if key in self.state_list:
-                        energy_new = self.state_list[key]
+                        new_energy_vector = self.state_list[key]
+                        pareto_optimal = self.pareto_optimality(state_candidate, new_energy_vector)
                     else:
                         if not self.constraint_func(state_candidate):
                             continue_flag = False
                             continue 
                         else:
-                            energy_new = self.log_distortion(self.call_function(state_candidate))
+                            new_energy_vector, pareto_optimal = self.call_function(state_candidate)
                             self.function_calls += 1
 
-                        self.state_list[key] = energy_new
-                        self.energy_list = np.append(self.energy_list, [energy_new])
+                        self.state_list[key] = new_energy_vector
+                        self.energy_list = np.append(self.energy_list, np.array([new_energy_vector]), axis = 0)
 
-                    self.energy_attempt_window.append(self.energy - energy_new)
+                    self.energy_attempt_window.append(self.energy_vector - new_energy_vector)
 
                     # accept higher energies probabilistically 
-                    if energy_new < self.energy:
+                    if pareto_optimal:
                         continue_flag = True
                         self.num_accepted += 1
                         self.num_accepted_total += 1
-                    elif min(1, np.exp((self.energy - energy_new)/np.max(self.temperature))) > np.random.uniform(0,1): # metropolis criterion
-                        continue_flag = True
-                        self.num_accepted += 1
-                        self.num_accepted_total += 1
+                    else:
+                        range_vec = np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+                        normalized_deltas = (self.energy_vector - new_energy_vector) / range_vec
+                        uphill_losses = normalized_deltas[normalized_deltas < 0]
+                        
+                        if len(uphill_losses) > 0:
+                            delta_dom = np.mean(np.abs(uphill_losses))
+                            
+                            if np.all(np.exp(-delta_dom / self.temperature) > np.random.uniform(0, 1)):
+                                continue_flag = True
+                                self.num_accepted += 1
+                                self.num_accepted_total += 1
 
                     self.proposed_states += 1
 
@@ -403,7 +460,7 @@ class SAOptimization:
                 # if the number of accepted states has reached the reanneal limit, commence reannealing
                 if self.num_accepted_total == self.reanneal_limit or iter == self.reanneal_limit: 
                     # calculate new k using change in temperature and sensitivity
-                    self.sensitivity = self.get_sensitivity(self.log_distortion, self.call_function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
+                    self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
                     self.function_calls += 1
                     self.function_calls_since_min = self.function_calls
 
@@ -417,7 +474,7 @@ class SAOptimization:
                     new_qmc_point = self.sampler.random(n=1)
                     teleport_state = scipy.stats.qmc.scale(new_qmc_point, self.state_lims[0,:], self.state_lims[1,:]).flatten()
                     self.state = np.round(teleport_state / self.state_inc) * self.state_inc
-                    self.energy = self.log_distortion(self.call_function(self.state))
+                    self.energy_vector, _ = self.call_function(self.state)
 
                 else:
                     # exponentially increase k
@@ -428,39 +485,42 @@ class SAOptimization:
                         volatility_damping = 1.0 / (1.0 + self.volatility_ratio)
                         self.k += np.clip(2.0 * acceptance_factor * volatility_damping, 0.1, self.ndim)
 
-                    self.energy = energy_new
+                    self.energy_vector = new_energy_vector
                     self.state = state_candidate
+                    if np.any(np.isnan(self.state)):
+                        raise ValueError("State defined nan at state candidate")
                     self.iter_since_reanneal += 1
-                    self.momentum_scaling *= 0.99
+                    self.momentum_scaling = np.clip(self.momentum_scaling * 0.99, 1e-6, 1.0)
 
                 # adjust reanneal limit based off local terrain
-                self.energy_window.append(self.energy)
+                self.energy_window.append(np.array([self.energy_vector]))
 
                 if len(self.energy_window) >= self.energy_window.maxlen:
-                    energy_std = np.std(self.energy_window)
-                    energy_mean = np.mean(self.energy_window)
+                    energy_std = np.max(np.std(self.energy_window, axis = 0), axis = 1)[0]
+                    energy_mean = np.max(np.mean(self.energy_window, axis = 0), axis = 1)[0]
 
                     self.volatility_ratio = energy_std / (np.abs(energy_mean) + 1e-6)
+
                     self.reanneal_limit = int(self.base_reanneal_limit * (self.volatility_ratio))
                     self.reanneal_limit = np.clip(self.reanneal_limit, self.ndim, 100 * self.ndim)
-                    sigmoid_volatility = 1/(1 + np.exp(-self.volatility_ratio))
+
                     self.temperature_base = self.temperature_base_ref + (1 - self.temperature_base_ref)*self.volatility_ratio
 
-                self.accepted_energies = np.append(self.accepted_energies, [self.energy])
+                self.accepted_energies = np.append(self.accepted_energies, [self.energy_vector], axis = 0)
                 self.temperature_history = np.append(self.temperature_history, [self.temperature], axis = 0)
                 self.accepted_states = np.append(self.accepted_states, [self.state], axis = 0)
 
-                if self.energy < self.global_min_energy:
-                    if self.global_min_energy - self.energy > min_tol:
+                if pareto_optimal:
+                    if np.all(self.global_min_energy - self.energy_vector > min_tol):
                         self.iter_since_energy_loss = 0
                     else:
                         self.iter_since_energy_loss += 1
                     
-                    self.global_min_energy = self.energy
+                    self.global_min_energy = self.energy_vector
                     self.global_min_state = self.state
 
                     # calculate sensitivity using the directional gradient of energy
-                    self.sensitivity = self.get_sensitivity(self.log_distortion, self.call_function, self.state, self.energy, self.state_inc, self.state_list, self.state_lims)
+                    self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
                     self.function_calls += 1
                     self.function_calls_since_min = self.function_calls
                 else:
@@ -479,10 +539,10 @@ class SAOptimization:
                 cutoff = len(self.state) // 2 + 1
 
                 pbar.set_postfix({
-                    "volatility": " {:.3f} / {:.3f} = {:.3f}".format(np.std(self.energy_window), np.mean(self.energy_window), self.volatility_ratio),
-                    "accept ratio ": "{:.4f}".format(acceptance_ratio),
-                    "k": "{:.2e}".format(np.max(self.k)),
-                    "Best": "{:.3e}".format(self.global_min_energy),
+                    "accept ratio ": "{:.2f}".format(acceptance_ratio),
+                    "Norm Vector": np.array2string(np.maximum(1e-9, self.nadir_vector - self.ideal_vector), formatter={'float_kind':lambda x: "%.2f" % x}),
+                    "Best": np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2f" % x}),
+                    "Pareto States": "{:d}".format(self.pareto_optimal_states.shape[0])
                 })
 
                 self.k_list = np.append(self.k_list, [self.k], axis = 0)
@@ -493,21 +553,23 @@ class SAOptimization:
                 # this helps the parallel compute ignore this run if its already ran completely
                 iterations = max_steps
 
-        tqdm.tqdm.write(f"Optimization Complete. Global Min: {self.global_min_energy:.3f}")
+        tqdm.tqdm.write("Optimization Complete. Global Min: " + np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2e" % x}))
 
-        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, self.proposed_states, self.penalty_log
+        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, self.proposed_states, self.pareto_optimal_states, self.pareto_optimal_values
 
     def plot_results(self):
 
         fig, axs = plt.subplots(3,1)
-        axs[0].semilogy(self.accepted_energies)
+        
         axs[0].grid(True)
         axs[0].set_xlabel('Iteration')
         axs[0].set_ylabel('Energy')
-        axs[0].scatter(np.where(self.accepted_energies == self.global_min_energy)[0][0], self.global_min_energy, marker = 'x', c ='r')  
-        
+        for i, min_energy in enumerate(self.global_min_energy):
+            axs[0].semilogy(self.accepted_energies[:,i])
+            axs[0].scatter(np.where(self.accepted_energies[:,i] == min_energy)[0][0], min_energy, marker = 'x', color = 'r')
+
         axs[1].plot(self.acceptance_ratio_list)
-        axs[1].axhline(self.target_ratio)
+        axs[1].axhline(self.target_ratio, linestyle ='--')
         axs[1].grid(True)
         axs[1].set_ylabel('Acceptance Ratio')
         axs[1].set_ylim([0, 1])
@@ -518,7 +580,7 @@ class SAOptimization:
         axs[2].set_ylabel('k-values')
 
         print('Function Calls: {:d} ({:d} extra)'.format(self.function_calls, self.function_calls - self.function_calls_since_min))
-        print('Global Min @ f('+', '.join('{:.3f}'.format(k) for k in self.global_min_state)+') = {:.3f}'.format(self.global_min_energy))
+        print('Global Min @ f('+', '.join('{:.3f}'.format(k) for k in self.global_min_state)+') = '+np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2e" % x}))
 
 if __name__ == "__main__":
 
