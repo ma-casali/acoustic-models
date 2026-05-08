@@ -14,7 +14,7 @@ from BeamformingModel import BeamformingModel
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath('../acoustic-models'))
-from SimulatedAnnealing import SAOptimization, SAParallel
+from SimulatedAnnealing import SAOptimization
 
 # This is a problem that is perfect for simulated annealing, since the objective function is discrete valued and non-differentiable
 
@@ -52,7 +52,7 @@ def objective_function_fast(state, optimal_state = False):
     # constants
     c = 1460 # m/s
     f_hi = 100 # Hz
-    f_lo = 20 # Hz
+    f_lo = 10 # Hz
     df = 10 # Hz
     
     # calculation of point coordinates from state
@@ -81,7 +81,7 @@ def objective_function_fast(state, optimal_state = False):
     bins = c / (2 * np.arange(f_lo, f_hi + df, df)) # include right-most edge
     bins = np.flip(bins) # monotonically increasing
     d_hist, _ = np.histogram(unique_distances, bins=bins)
-    penalty_f_density = np.std(d_hist)/np.mean(d_hist)
+    penalty_f_density = 2 / (1 + np.exp(-np.std(d_hist)/np.mean(d_hist))) - 1
 
     # determine subarrays for each band
     active_elements = np.full((n, len(f_cutoff)-1), False)
@@ -141,73 +141,104 @@ def objective_function_fast(state, optimal_state = False):
 
     return np.array([penalty_total_size, penalty_count, penalty_aperture_min, penalty_f_density])
 
-def objective_function_slow(state, optimal_state = False, penalty_start = 6):
+def objective_function_slow(state):
+
+    def get_aperture_size(nodes):
+        # measure city-block size of sub-arrays
+        if len(nodes) < 2: return 0
+        subset_points = coords[list(nodes)]
+        return np.max(scipy.spatial.distance.pdist(subset_points, metric='cityblock'))
+
+    # constants
+    c = 1460 # m/s
+    f_hi = 200 # Hz
+    f_lo = 10 # Hz
+    df = 10 # Hz
+    steer_de = np.radians(np.arange(0, 90, 10))
 
     num_elements = len(state) // 2 + 2
     coords = np.zeros((num_elements, 2), dtype=np.float32)
     coords[1, :] = [0, state[0]] # place the second element on the y-axis to break symmetry and reduce the search space
-    
     curr_angle = 0
     for i in range(2, num_elements):
         curr_angle += state[(num_elements - 1)+ (i - 2)]
         coords[i, 0] = coords[i-1, 0] + state[i-1] * np.cos(curr_angle)
         coords[i, 1] = coords[i-1, 1] + state[i-1] * np.sin(curr_angle)
-
     coords = np.round(coords, decimals = 2) # round to 2 decimals to align with centimeter spaced grid
 
-    f = np.floor(np.logspace(np.log10(50), np.log10(200), num = 3)) # generic frequencies (used in optimization)
-    f_1 = np.random.choice(np.arange(f[0]+1, f[1], 1), size = 1) # don't need more resolution than 1 Hz. 
-    f_2 = np.random.choice(np.arange(f[1]+1, f[2], 1), size = 1) # this should allow for ~100 function calls to cover the whole frequency range
-    f = np.concatenate(([f[0]], f_1, [f[1]], f_2, [f[2]])) # add some randomization to the frequencies used in optimization to avoid overfitting to specific frequencies
+        # get total size and apply to penalty
+    total_height = (np.max(coords[:, 1]) - np.min(coords[:, 1])) / (c / f_lo / 2)
+    total_width = (np.max(coords[:, 0]) - np.min(coords[:, 0])) / (c / f_lo / 2)
+    penalty_total_size = 2 / (1 + np.exp(-(total_height + total_width))) - 1
 
-    steer_de = np.radians(np.arange(0, 90, 10))
+    # geometric penalty
+    # determine unique distances and therefore all possible band-limits
+    dist_matrix = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(coords))
+    unique_distances = np.sort(np.unique(dist_matrix)) 
+    unique_distances = unique_distances[unique_distances >= 0.01]
+    f_cutoff = c / (2 * unique_distances) # sorted from highest to lowest
 
-    # geometric calculations
-    if np.isnan(coords).any() or (coords == np.inf).any():
-        print(coords)
-        print(state)
-    tree = cKDTree(coords)
-    penalty_connected_elements = 0
-    height_data = []
-    width_data = []
-    for freq in f:
-        spacing = 1460 / freq / 2
+    # use distances to determine the evenness of frequency coverage across the band of interest
+    bins = c / (2 * np.arange(f_lo, f_hi + df, df)) # include right-most edge
+    bins = np.flip(bins) # monotonically increasing
+    d_hist, _ = np.histogram(unique_distances, bins=bins)
+    penalty_f_density = 2 / (1 + np.exp(-np.std(d_hist)/np.mean(d_hist))) - 1
 
-        pairs = tree.query_pairs(r = spacing)
-        filtered_pairs = set()
-        for (i, j) in pairs:
-            dist = np.linalg.norm(coords[i] - coords[j])
-            # only show connections that are at least 1/5 of the wavelength apart to avoid apertures that are too small compared to a wavelength
-            if dist >= spacing * 2 / 5: 
-                filtered_pairs.add((i, j))
+        # determine subarrays for each band
+    active_elements = np.full((num_elements, len(f_cutoff)-1), False)
+    for band_id in range(len(f_cutoff) - 1): 
+        d = unique_distances[band_id + 1]
+        adj_matrix = (dist_matrix <= d).astype(int)
+        n_components, labels = scipy.sparse.csgraph.connected_components(csgraph=adj_matrix, directed=False)
+        
+        # find largest aperture size
+        best_aperture = -1
+        largest_subarray_mask = None
+        for label_id in range(n_components):
+            current_mask = (labels == label_id)
+            nodes = np.where(current_mask)[0]
+            ap_size = get_aperture_size(nodes)
+            
+            if ap_size > best_aperture:
+                best_aperture = ap_size
+                largest_subarray_mask = current_mask
 
-        G = nx.Graph()
-        G.add_nodes_from(range(num_elements))
-        G.add_edges_from(filtered_pairs)
+        active_elements[:, band_id] = largest_subarray_mask
 
-        components = list(nx.connected_components(G))
-        max_ind = np.argmax([len(c) for c in components])
-        connected_points = coords[list(components[max_ind])]
+    bands = active_elements.T 
+    unique_configs, _, mapping = np.unique(bands, axis=0, return_index=True, return_inverse=True)
+    unique_subarrays = unique_configs.T
 
-        N = len(connected_points)
-        penalty_connected_elements += 1 - np.atan(np.sqrt((num_elements - N)/num_elements) * np.pi / 2)
-    
-        rect = cv2.minAreaRect(connected_points)
-        aperture_width = rect[1][0]
-        aperture_height = rect[1][1]
-        height_val = aperture_height / spacing
-        width_val = aperture_width / spacing
+    height_data = np.zeros(unique_subarrays.shape[1])
+    width_data = np.zeros(unique_subarrays.shape[1])
+    f_array = np.zeros(unique_subarrays.shape[1])
+    count_array = np.zeros(unique_subarrays.shape[1])
+    for i in range(unique_subarrays.shape[1]): 
+        
+        f_array[i] = f_cutoff[np.where(mapping == i)[0][0] + 1]
+        count_array[i] = np.sum(unique_subarrays[:, i])
+        
+        f_lo = f_cutoff[np.where(mapping == i)[0][-1] + 1]
+        spacing = max(0.01, (c / f_lo) / 2)
 
-        # cost increases rapidly as the aperture size decreases and 1 at num_elements
-        height_data.append(height_val)
-        width_data.append(width_val)
+        element_mask = unique_subarrays[:, i].flatten()
+        selected_elements = coords[element_mask]
 
-    penalty_connected_elements = penalty_connected_elements / len(f) # [0, 1]
-    penalty_aperture_variance = 2 / (1 + np.exp(-(np.std(height_data) + np.std(width_data)))) # [0, 1]
-    penalty_aperture_min = np.exp(-(np.min(height_data) + np.min(width_data))) # [1, 0]
-    penalty_aperture_balance = 2 / (1 + np.exp(-np.max(np.abs(np.array(height_data) - np.array(width_data))))) # [0, 1]
+        aperture_width = np.max(selected_elements[:,0]) - np.min(selected_elements[:,0])
+        aperture_height = np.max(selected_elements[:,1]) - np.min(selected_elements[:,1])
+        height_data[i] = aperture_height / spacing
+        width_data[i] = aperture_width / spacing
 
-    penalty_geometric = (penalty_connected_elements + penalty_aperture_variance + penalty_aperture_min + penalty_aperture_balance)/4
+    if np.all(height_data == 0):
+        penalty_aperture_min = 1
+    else:
+        penalty_aperture_min = np.exp(-(np.min(height_data) + np.min(width_data))) # [1, 0]
+
+    if len(count_array) > 2:
+        med_ind = np.argmin(np.abs(np.diff(count_array - np.mean(count_array)))) # round down
+        penalty_count = 1 - count_array[med_ind] / np.max(count_array) # * f_array[med_ind] / max(np.max(f_array), 1e-9)
+    else:
+        penalty_count = 1
 
     # DI and MSLL calculations
     if len(np.unique(coords, axis = 0)) < num_elements:
@@ -227,13 +258,23 @@ def objective_function_slow(state, optimal_state = False, penalty_start = 6):
 
         array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPOLE)
         bf_model = BeamformingModel(array, c = 1460)
+
+        bands = bf_model.active_elements
+        unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
+        subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
+        valid_inds = np.where(subarray_mask)[0]
+        f = []
+        for i in valid_inds: 
+            f_hi = bf_model.f_cutoff[first_occurrence[i]+1]
+            f_lo = bf_model.f_cutoff[np.where(mapping == i)[0][-1] + 1]
+            if f_hi != f_lo:
+                f.append((f_hi - f_lo)/2 + f_lo)
         
         di_f = np.zeros(len(f))
         msll_f = np.zeros(len(f))
         for i in range(len(f)):
             di_f[i], _, msll_f[i] = bf_model.get_beamforming_performance_measures(frequency=f[i], delta_az = 10, delta_de = 2, use_primary_filter=True)
             msll_f[i] = min(-1, msll_f[i])
-
         
         di_de = np.zeros(len(steer_de))
         msll_de = np.zeros(len(steer_de))
@@ -241,34 +282,11 @@ def objective_function_slow(state, optimal_state = False, penalty_start = 6):
             di_de[i], _, msll_de[i] = bf_model.get_beamforming_performance_measures(frequency=44, delta_az = 10, delta_de = 2, steer_de=np.array([[steer_de[i]]]), use_primary_filter=True)
             msll_de[i] = min(-1, msll_de[i])
 
-    # want to optimize the following items (in order of importance):
-    # 1. minimax di
-    # 2. minimize variance of di across frequenciess
-    # 3. minimax HPBW across frequencies
-    # 4. minimax HPBW range across frequencies (max HPBW - min HPBW)
-
-    penalty_di_f = 0 # np.exp(-np.min(di_f) * np.log(2) / 8) # [1 -> 0], higher is better, 0.5 at 8 dB  
-    penalty_di_f += 0 # np.exp(-np.max(di_f) * np.log(2) / 8) # [1 -> 0], higher is better, 0.5 at 8 dB
-    penalty_di_f_variance = 2 / ( 1 + np.exp(-np.std(di_f))) - 1 # [0 -> 1], lower is better
-    penalty_side_lobe_f = 1 / (np.max(np.abs(msll_f)) * 0.2 / 20) / 10 # [1 -> 0], higher is better, 0.5 at 20 dB down
-
-    penalty_di_de = 0 # np.exp(-np.min(di_de) * np.log(1) / 8) * 0.5 # [1 -> 0], higher is better, 0.5 at 8 dB  
-    penalty_di_de += 0 # np.exp(-np.max(di_de) * np.log(1) / 8) * 0.5 # [1 -> 0], higher is better, 0.5 at 8 dB
+    penalty_di_f = np.exp(-np.min(di_f)) 
+    penalty_side_lobe_f = np.exp(np.max(msll_f))
     penalty_di_de_variance = 2 / ( 1 + np.exp(-np.std(di_de))) - 1 # [0 -> 1], lower is better
-    penalty_side_lobe_de = 1 / (np.max(np.abs(msll_de)) * 0.2 / 20) / 10 # [1 -> 0], higher is better, 0.5 at 20 dB down
 
-    penalty_bf = penalty_di_f + penalty_di_de + penalty_di_f_variance + penalty_di_de_variance + penalty_side_lobe_f + penalty_side_lobe_de # + penalty_hpbw + penalty_hpbw_range # total penalty on [0, 6]
-
-    gamma = 1.0 / 4.0
-    penalty = penalty_geometric + gamma * penalty_bf
-
-    if optimal_state:
-        return [
-            penalty_geometric, 
-            penalty_bf
-        ]
-
-    return penalty
+    return np.array([penalty_f_density, penalty_di_f, penalty_side_lobe_f, penalty_di_de_variance, penalty_total_size, penalty_count, penalty_aperture_min])
 
 def search_scaling(state, state_inc):
 
@@ -296,20 +314,20 @@ if __name__ == "__main__":
 
     np.seterr(all='raise')
     np.random.seed(13)
-    num_elements = 25
+    num_elements = 31
 
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
     save_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_'+now)
 
     d_min = 1460 / 100 / 2 # half wavelength at 60 Hz
-    d_max = 1460 / 20 / 2 # half wavelength at 20 Hz
+    d_max = 1460 / 10 / 2 # half wavelength at 20 Hz
 
     d_lims = np.tile([[d_min, d_min*2]], (num_elements-1, 1)) # make sure an element point isn't rounded above d_max
     theta_lims = np.tile([[np.radians(0), np.radians(359.5)]], (num_elements-2, 1))
     theta_lims[0,:] = [np.radians(0), np.radians(180)] # limit the angle from the second element to avoid symmetric duplicates of the same array geometry
 
-    d_inc = np.tile(d_min / 10, num_elements-1)
-    th_inc = np.tile(np.radians(15), num_elements-2)
+    d_inc = np.tile(d_min, num_elements-1)
+    th_inc = np.tile(np.radians(1), num_elements-2)
 
     d_0 = np.random.uniform(d_lims[:, 0], d_lims[:, 1], size = num_elements-1)
     th_0 = np.random.uniform(theta_lims[:, 0], theta_lims[:, 1], size = num_elements-2) # element 2 is always on y-axis
@@ -321,18 +339,8 @@ if __name__ == "__main__":
     circular_inds = np.full_like(initial_state, False, dtype = bool)
     circular_inds[len(d_0) + 2:] = True # angles are circular variables
 
-    # parallel_opt = SAParallel(n_opt=10, temp_ratio=10)
-    # opt = parallel_opt.run(func = objective_function_slow, ndim = np.shape(state_inc)[0], state_lims = state_lims, state_inc = state_inc, search_scaling_func = search_scaling)
     opt = SAOptimization(func = objective_function_fast, ndim = np.shape(state_inc)[0], state_lims = state_lims, state_inc = state_inc, search_scaling_func = search_scaling)
     opt.optimize()
-
-    # opt.function = objective_function_slow
-    # opt.r = np.array([0])
-    # opt.reanneal_history = np.array([0])
-    # opt.energy_reference = opt.global_min_energy
-    # opt.state = opt.global_min_state
-    # opt.energy = opt.global_min_energy
-    # opt.optimize()
 
     optimal_state = opt.global_min_state
 

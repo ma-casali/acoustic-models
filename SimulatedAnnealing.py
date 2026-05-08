@@ -3,100 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
 import scipy
+from pymoo.indicators.hv import HV
 import concurrent.futures
 from collections import deque
-
-class SAParallel:
-
-    def __init__(
-            self,
-            n_opt: int = None,
-            temp_ratio: float = None
-    ):
-        self.n_opt = n_opt if n_opt is not None else 10
-        self.temp_ratio = temp_ratio if temp_ratio is not None else 10.0
-
-        self.temp_scaling = self.temp_ratio**(-0.5 + np.arange(self.n_opt)/self.n_opt)
-
-        self.exchange_interval = 100
-        self.window_length = 100
-
-    def _step_optimizer(self, opt, steps):
-        opt.optimize(max_steps=steps)
-        return opt
-
-    def _attempt_swaps(self):
-        for i in range(self.n_opt - 1):
-            opt1 = self.optimizers[i]
-            opt2 = self.optimizers[i+1]
-
-            # Calculate the swap probability
-            # Delta_Beta * Delta_Energy
-            # Beta = 1/Temperature
-            beta1 = 1.0 / np.max(opt1.temperature)
-            beta2 = 1.0 / np.max(opt2.temperature)
-            
-            delta_energy = opt1.energy - opt2.energy
-            delta_beta = beta1 - beta2
-            
-            swap_prob = np.exp(delta_beta * delta_energy)
-
-            if np.random.uniform(0, 1) < swap_prob:
-                self.accepted_swaps += 1
-                # Perform the swap: Only swap the current state and current energy
-                opt1.state, opt2.state = opt2.state.copy(), opt1.state.copy()
-                opt1.energy, opt2.energy = opt2.energy, opt1.energy
-
-            self.optimizers[i] = opt1
-            self.optimizers[i+1] = opt2
-        
-    def run(self, **kwargs):
-        
-        self.optimizers = []
-        optimizers = [SAOptimization(**kwargs) for _ in range(self.n_opt)]
-        for i, opt in enumerate(optimizers):
-            opt.temperature_0 *= self.temp_scaling[i]
-            opt.temperature = opt.temperature_0.copy()
-            self.optimizers.append(opt)
-
-        total_calls = 0
-        max_calls = 1e6 * self.n_opt
-        self.swap_ratio = np.empty(self.window_length)
-        best_min = np.inf
-        iter_since_improvement = 0
-        with concurrent.futures.ProcessPoolExecutor(max_workers=self.n_opt) as executor:
-            continue_flag = True
-            while total_calls < max_calls and continue_flag:
-                # 1. MAP: Run all optimizers in parallel
-                futures = [executor.submit(self._step_optimizer, opt, self.exchange_interval) 
-                           for opt in self.optimizers]
-                
-                # Re-collect updated objects
-                self.optimizers = [f.result() for f in futures]
-                total_calls += sum(opt.function_calls for opt in self.optimizers)
-
-                self.accepted_swaps = 0
-                self._attempt_swaps()
-                self.swap_ratio = np.roll(self.swap_ratio, -1)
-                self.swap_ratio[-1] = self.accepted_swaps / (self.n_opt - 1)
-
-                # Update global best
-                current_min_opt = min(self.optimizers, key=lambda x: x.global_min_energy)
-                if best_min <= current_min_opt.global_min_energy:
-                    iter_since_improvement += 1
-                else:
-                    iter_since_improvement = 0
-                    self.global_best_opt = current_min_opt
-                best_min = min(current_min_opt.global_min_energy, best_min)
-                temps = np.array([opt.temperature[0] for opt in self.optimizers])
-                temps = temps / np.max(temps)
-                temps_str = np.array2string(temps, formatter={'float_kind':lambda x: f"{x:.2f}"})
-                print(f"\rBest Energy: {best_min:.4e} | Mean Swap Ratio: {np.nanmean(self.swap_ratio):.2f} / {swap_ratio_cutoff:.2f} | Progress: {iter_since_improvement}/{self.optimizers[0].ndim * 5} | Total Calls: {total_calls:.2e} ", end = "")
-
-                if np.nanmean(self.swap_ratio) > 0.75 or iter_since_improvement >= self.optimizers[0].ndim * 5:
-                    continue_flag = False
-
-        return self.global_best_opt
 
 class SAOptimization:
 
@@ -132,7 +41,6 @@ class SAOptimization:
         # 1. The search dimensions should always be at least 2-3 times larger than the state increment
         
         # function related variables
-        self.function_calls = 0
         self.function = func if func is not None else self.rosenbrock
         self.constraint_func = constraint_func if constraint_func is not None else self.default_constraint
 
@@ -166,21 +74,24 @@ class SAOptimization:
             
         self.circular_inds = circular_inds if circular_inds is not None else np.full_like(self.state, False, dtype = bool)
             
-        # state related variables
-        self.state_list = {}
         self.state_inc = state_inc if state_inc is not None else np.array([0.01]*self.ndim)
         self.state = np.int32(np.floor(self.state/self.state_inc))*self.state_inc # round initial state to nearest increment
+        self.accepted_states = deque(maxlen=2)
         self.state_space = np.diff(self.state_lims, axis = 0)/self.state_inc
-        self.accepted_states = self.state[np.newaxis, :]
         self.search_scaling_func = search_scaling_func if search_scaling_func is not None else self.default_search_scaling_func
+
+         # Pareto variables
+        self.pareto_optimal_states = None
+        self.pareto_optimal_values = None
+        self.hypervolume = 0.0
+        self.hypervolume_history = deque(maxlen=5*self.ndim)
+        self.improvement_history = []
+        self.improvement_eps = 1e-6
 
         # energy variables
         self.energy_reference = None
-        self.energy_list = None
+        self.accepted_energies = deque(maxlen=2)
         self.energy_vector, _ = self.call_function(self.state)
-        self.state_list[tuple(self.state)] = self.energy_vector
-        self.function_calls += 1
-        self.accepted_energies = np.array([self.energy_vector])
         self.ideal_vector = np.zeros_like(self.energy_vector)
         self.nadir_vector = np.ones_like(self.energy_vector)
         
@@ -202,8 +113,6 @@ class SAOptimization:
 
             if np.any(delta_energy > 0):
                 deltas.append(delta_energy)
-            
-            self.function_calls += 1
 
         if len(deltas) > 0:
             avg_delta = np.mean(np.abs(deltas))
@@ -219,8 +128,7 @@ class SAOptimization:
         self.temperature_history = np.array([self.temperature])
         self.temperature_base = 0.98
         self.temperature_base_ref = 0.95
-        self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
-        self.function_calls += 1
+        self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_lims)
 
         # meta-parameters
         # self.reanneal_limit = np.round(np.linalg.norm(self.state_space)**(np.sqrt(np.shape(self.state)[0]/(np.shape(self.state)[0]+1))))
@@ -230,7 +138,6 @@ class SAOptimization:
         self.energy_window = deque(maxlen=5*self.ndim)
         self.energy_attempt_window = deque(maxlen=5*self.ndim)
         self.r = [0]
-        self.function_calls_since_min = 0
         self.momentum_scaling = 1.0
         self.momentum = np.zeros_like(self.state)
 
@@ -241,7 +148,6 @@ class SAOptimization:
         self.energy_loss_history = np.array(self.iter_since_energy_loss)
         self.global_min_energy = self.energy_vector
         self.global_min_state = self.state
-        self.search_list = np.array(self.state_space * self.state_inc)
         self.max_calls = max_calls if max_calls is not None else np.inf
 
         self.window_length = 100
@@ -267,14 +173,13 @@ class SAOptimization:
         # 1. all objectives at that state are less than or equal to the same objective evaluated at any other state
         # 2. at least one objective evaluated at the state is the minimum for that objective
 
-        if self.energy_list is None:
-            self.energy_list = np.array([np.ones_like(new_energy_vector)])
+        if self.pareto_optimal_values is None:
             self.pareto_optimal_states = np.array([self.state])
             self.pareto_optimal_values = np.array([np.ones_like(new_energy_vector)])
             return True # non-dominated
 
-        condition1 = np.all(new_energy_vector >= self.energy_list, axis = 1)
-        condition2 = np.any(new_energy_vector > self.energy_list, axis = 1)
+        condition1 = np.all(new_energy_vector >= self.pareto_optimal_values, axis = 1)
+        condition2 = np.any(new_energy_vector > self.pareto_optimal_values, axis = 1)
 
         is_dominated = np.any(condition1 & condition2)
 
@@ -293,20 +198,26 @@ class SAOptimization:
             else:
                 self.pareto_optimal_states = np.vstack([self.pareto_optimal_states, x])
                 self.pareto_optimal_values = np.vstack([self.pareto_optimal_values, new_energy_vector])
-
-            # print(f"Replaced {np.sum(~(rev_condition1 & rev_condition2)):d} optimal state(s) with: ", new_energy_vector)
-            # print(f"{self.pareto_optimal_states.shape[0]:d} Pareto Optimal States")
         else:
             return False # dominated
 
         # update nadir vector and ideal vector
-        if self.energy_list.shape[1] > 1:
+        if self.pareto_optimal_values.shape[1] > 1:
             self.ideal_vector = np.min(self.pareto_optimal_values, axis = 0)
             self.nadir_vector = np.max(self.pareto_optimal_values, axis = 0)
 
         return np.all(condition1 & condition2)
+    
+    def calculate_hypervolume(self):
+        if self.pareto_optimal_values is None or len(self.pareto_optimal_values) == 0:
+            return 0.0
 
-    def get_sensitivity(self, fun, x, y, dx, x_list, lims):
+        ref_point = 1.1 * np.ones_like(self.nadir_vector)
+        ind = HV(ref_point=ref_point)
+
+        return ind(self.pareto_optimal_values)
+
+    def get_sensitivity(self, fun, x, y, dx, lims):
 
         """
         Calculates the direction of the gradient of the energy function using a finite difference approximation,
@@ -319,10 +230,7 @@ class SAOptimization:
         np.fill_diagonal(x_prime, diag)  
         y_prime = np.zeros((len(x), len(self.energy_vector)), dtype = np.float64)
         for i1 in range(np.shape(x_prime)[0]):
-            if tuple(x_prime[i1]) in self.state_list:
-                y_prime[i1, :] = self.state_list[tuple(x_prime[i1])]
-            else:
-                y_prime[i1, :], _ = fun(x_prime[i1])
+            y_prime[i1, :], _ = fun(x_prime[i1])
 
         norm_diff = (y_prime - y)/np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
         norm_diff = np.sum(norm_diff, axis = 1)
@@ -355,17 +263,19 @@ class SAOptimization:
     def optimize(self, max_steps = np.inf, min_tol = 1e-6):
 
         tqdm.tqdm.write(f'Starting optimization with initial state: '+', '.join('{:.3f}'.format(k) for k in self.state)+f' and initial energy: {self.energy_vector}')
-        update_val_old = 0
         acceptance_ratio = 1
+        update_value_old = 0
+        improvement = 1.0 + self.improvement_eps
         with tqdm.tqdm(total = 100, desc = "Annealing") as pbar:
             iterations = 0
-            while self.r[-1] < 2 * self.ndim and iterations < max_steps:
+            while improvement > self.improvement_eps and iterations < max_steps:
 
                 # calculate momentum, the measure of how much the state is changing
                 # this will generally tell you how the algorithm is trending towards a minimum and in what direction
-                if self.accepted_energies.shape[0] >= 2:
-                    delta_state = np.diff(self.accepted_states[-2:,:], axis = 0).flatten()
-                    delta_energy = np.diff(self.accepted_energies[-2:,:], axis = 0)[0]/np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+                if len(self.accepted_energies) == 2:
+                    delta_state = (np.array(self.accepted_states[1]) - np.array(self.accepted_states[0])).flatten()
+                    norm_denom = np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+                    delta_energy = (np.array(self.accepted_energies[1]) - np.array(self.accepted_energies[0])) / norm_denom
                     dominance_value = np.prod(delta_energy[delta_energy != 0])
 
                     self.momentum[delta_state != 0] += dominance_value/delta_state[delta_state != 0]
@@ -380,15 +290,16 @@ class SAOptimization:
                 search_scaling = self.search_scaling_func(self.state, self.state_inc) * self.adaptive_scaling
                 search_dimensions = np.round(self.state_space * temp_ratio * search_scaling) * self.state_inc
                 search_dimensions = np.clip(search_dimensions, self.state_inc * 3, self.state_space*self.state_inc)
-                self.search_list = np.append(self.search_list, search_dimensions, axis = 0)
 
-                # attempt to land on a new state 
+                # MARK: - New State Attempts
                 continue_flag = False
                 state_candidate = np.zeros_like(self.state, dtype = np.float64)
                 iter = 0
                 while not continue_flag and iter < self.reanneal_limit:
                     iter += 1
-
+                    
+                    inc = self.state_inc
+                    lims = self.state_lims
                     for i1 in range(np.shape(self.state)[0]):
                         if self.momentum[i1] >= 100:
                             alpha = 1 * self.momentum_scaling
@@ -407,26 +318,14 @@ class SAOptimization:
                         if self.circular_inds[i1]:
                             state_candidate[i1] = state_candidate[i1] % (2 * np.pi)
                         else:
-                            state_candidate[i1] = np.clip(state_candidate[i1], self.state_lims[0, i1], self.state_lims[1, i1])
-                        state_candidate[i1] = np.round(state_candidate[i1]/self.state_inc[i1])*self.state_inc[i1] # round to nearest increment
+                            state_candidate[i1] = np.clip(state_candidate[i1], lims[0, i1], lims[1, i1])
+                        state_candidate[i1] = np.round(state_candidate[i1]/inc[i1])*inc[i1] # round to nearest increment
 
-                    key = tuple(state_candidate)
-                    # see if computation was already done
-                    if key in self.state_list:
-                        new_energy_vector = self.state_list[key]
-                        pareto_optimal = self.pareto_optimality(state_candidate, new_energy_vector)
+                    if not self.constraint_func(state_candidate):
+                        continue_flag = False
+                        continue 
                     else:
-                        if not self.constraint_func(state_candidate):
-                            continue_flag = False
-                            continue 
-                        else:
-                            new_energy_vector, pareto_optimal = self.call_function(state_candidate)
-                            self.function_calls += 1
-
-                        self.state_list[key] = new_energy_vector
-                        self.energy_list = np.append(self.energy_list, np.array([new_energy_vector]), axis = 0)
-
-                    self.energy_attempt_window.append(self.energy_vector - new_energy_vector)
+                        new_energy_vector, pareto_optimal = self.call_function(state_candidate)
 
                     # accept higher energies probabilistically 
                     if pareto_optimal:
@@ -448,6 +347,7 @@ class SAOptimization:
 
                     self.proposed_states += 1
 
+                # MARK: - Adaptive Values
                 if self.proposed_states > self.window_length:
                     acceptance_ratio = self.num_accepted / self.proposed_states
                     dynamic_target = self.target_ratio * (1 + self.volatility_ratio)
@@ -460,9 +360,7 @@ class SAOptimization:
                 # if the number of accepted states has reached the reanneal limit, commence reannealing
                 if self.num_accepted_total == self.reanneal_limit or iter == self.reanneal_limit: 
                     # calculate new k using change in temperature and sensitivity
-                    self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
-                    self.function_calls += 1
-                    self.function_calls_since_min = self.function_calls
+                    self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_lims)
 
                     self.k = self.k/(1 + np.exp(self.sensitivity/np.linalg.norm(self.sensitivity)))
                     self.k = np.max(np.column_stack((self.k, self.k*0.1)), axis = 1)
@@ -477,13 +375,9 @@ class SAOptimization:
                     self.energy_vector, _ = self.call_function(self.state)
 
                 else:
-                    # exponentially increase k
-                    if self.iter_since_energy_loss > (10 * self.ndim):
-                        self.k += self.ndim
-                    else:
-                        acceptance_factor = (self.num_accepted / self.proposed_states) / self.target_ratio if self.proposed_states > self.window_length else 1.0
-                        volatility_damping = 1.0 / (1.0 + self.volatility_ratio)
-                        self.k += np.clip(2.0 * acceptance_factor * volatility_damping, 0.1, self.ndim)
+                    acceptance_factor = (self.num_accepted / self.proposed_states) / self.target_ratio if self.proposed_states > self.window_length else 1.0
+                    volatility_damping = 1.0 / (1.0 + self.volatility_ratio)
+                    self.k += np.clip(2.0 * acceptance_factor * volatility_damping, 0.1, self.ndim)
 
                     self.energy_vector = new_energy_vector
                     self.state = state_candidate
@@ -492,9 +386,11 @@ class SAOptimization:
                     self.iter_since_reanneal += 1
                     self.momentum_scaling = np.clip(self.momentum_scaling * 0.99, 1e-6, 1.0)
 
+                self.accepted_states.append(self.state)
+                self.accepted_energies.append(self.energy_vector)
+
                 # adjust reanneal limit based off local terrain
                 self.energy_window.append(np.array([self.energy_vector]))
-
                 if len(self.energy_window) >= self.energy_window.maxlen:
                     energy_std = np.max(np.std(self.energy_window, axis = 0), axis = 1)[0]
                     energy_mean = np.max(np.mean(self.energy_window, axis = 0), axis = 1)[0]
@@ -506,81 +402,35 @@ class SAOptimization:
 
                     self.temperature_base = self.temperature_base_ref + (1 - self.temperature_base_ref)*self.volatility_ratio
 
-                self.accepted_energies = np.append(self.accepted_energies, [self.energy_vector], axis = 0)
-                self.temperature_history = np.append(self.temperature_history, [self.temperature], axis = 0)
-                self.accepted_states = np.append(self.accepted_states, [self.state], axis = 0)
+                # MARK: - Hypervolume
+                self.hypervolume = self.calculate_hypervolume()
+                self.hypervolume_history.append(self.hypervolume)
+                if len(self.hypervolume_history) >= self.hypervolume_history.maxlen:
+                    improvement = np.maximum(self.improvement_eps*0.1, self.hypervolume_history[-1] - self.hypervolume_history[0])
 
-                if pareto_optimal:
-                    if np.all(self.global_min_energy - self.energy_vector > min_tol):
-                        self.iter_since_energy_loss = 0
-                    else:
-                        self.iter_since_energy_loss += 1
-                    
-                    self.global_min_energy = self.energy_vector
-                    self.global_min_state = self.state
+                    update_value_new = int(10**(2*(np.log10(improvement)/np.log10(self.improvement_eps) - 1))*100)
+                    pbar.update(update_value_new - update_value_old)
+                    update_value_old = update_value_new
 
-                    # calculate sensitivity using the directional gradient of energy
-                    self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_list, self.state_lims)
-                    self.function_calls += 1
-                    self.function_calls_since_min = self.function_calls
+                    pbar.set_postfix({
+                        "accept ratio ": "{:.2f}".format(acceptance_ratio),
+                        "hypervolume": "{:.3f}".format(self.hypervolume),
+                        "improvement": "{:.2e}".format(improvement),
+                        "Norm Vector": np.array2string(np.maximum(1e-9, self.nadir_vector - self.ideal_vector), formatter={'float_kind':lambda x: "%.2f" % x}),
+                        "Pareto States": "{:d}".format(self.pareto_optimal_states.shape[0])
+                    })
                 else:
-                    self.iter_since_energy_loss += 1
+                    update_value_new = int(len(self.hypervolume_history)/self.hypervolume_history.maxlen*100)
+                    pbar.update(update_value_new - update_value_old)
+                    update_value_old = update_value_new
 
-                self.reanneal_history = np.append(self.reanneal_history, self.iter_since_reanneal)
-                self.energy_loss_history = np.append(self.energy_loss_history, self.iter_since_energy_loss)
-
-                # check history to see how many reanneals have occurred since global energy decrease
-                self.r = np.append(self.r, np.sum(self.reanneal_history[-(self.iter_since_energy_loss+1):] == 0))
-
-                # if self.iter_since_reanneal % 100 == 0:
-                update_val_new = int(self.r[-1]/(2 * self.ndim)*100)
-                pbar.update(update_val_new - update_val_old)
-                update_val_old = update_val_new
-                cutoff = len(self.state) // 2 + 1
-
-                pbar.set_postfix({
-                    "accept ratio ": "{:.2f}".format(acceptance_ratio),
-                    "Norm Vector": np.array2string(np.maximum(1e-9, self.nadir_vector - self.ideal_vector), formatter={'float_kind':lambda x: "%.2f" % x}),
-                    "Best": np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2f" % x}),
-                    "Pareto States": "{:d}".format(self.pareto_optimal_states.shape[0])
-                })
-
-                self.k_list = np.append(self.k_list, [self.k], axis = 0)
-
-                iterations += 1
-
-            if self.r[-1] >= 5 * self.ndim:
-                # this helps the parallel compute ignore this run if its already ran completely
-                iterations = max_steps
+                # calculate sensitivity using the directional gradient of energy
+                self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_lims)
 
         tqdm.tqdm.write("Optimization Complete. Global Min: " + np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2e" % x}))
 
-        return self.global_min_state, self.global_min_energy, self.accepted_states, self.accepted_energies, self.proposed_states, self.pareto_optimal_states, self.pareto_optimal_values
+        return self.global_min_state, self.global_min_energy, self.proposed_states, self.pareto_optimal_states, self.pareto_optimal_values
 
-    def plot_results(self):
-
-        fig, axs = plt.subplots(3,1)
-        
-        axs[0].grid(True)
-        axs[0].set_xlabel('Iteration')
-        axs[0].set_ylabel('Energy')
-        for i, min_energy in enumerate(self.global_min_energy):
-            axs[0].semilogy(self.accepted_energies[:,i])
-            axs[0].scatter(np.where(self.accepted_energies[:,i] == min_energy)[0][0], min_energy, marker = 'x', color = 'r')
-
-        axs[1].plot(self.acceptance_ratio_list)
-        axs[1].axhline(self.target_ratio, linestyle ='--')
-        axs[1].grid(True)
-        axs[1].set_ylabel('Acceptance Ratio')
-        axs[1].set_ylim([0, 1])
-
-        axs[2].plot(self.k_list)
-        axs[2].grid(True)
-        axs[2].set_xlabel('Iteration')
-        axs[2].set_ylabel('k-values')
-
-        print('Function Calls: {:d} ({:d} extra)'.format(self.function_calls, self.function_calls - self.function_calls_since_min))
-        print('Global Min @ f('+', '.join('{:.3f}'.format(k) for k in self.global_min_state)+') = '+np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2e" % x}))
 
 if __name__ == "__main__":
 

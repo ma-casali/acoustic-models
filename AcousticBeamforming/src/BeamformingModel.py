@@ -82,6 +82,57 @@ def generate_hex_array(num_elements = 16, d: float = 343/2000/4, max_angle: floa
 
     return hex_coords[:, 0], hex_coords[:, 1], hex_coords[:, 2], eX, eY, eZ
 
+class DSUWithBounds:
+    def __init__(self, n, coords):
+        self.n = n
+        self.parent = np.arange(n)
+        self.num_components = n
+        self.size = np.ones(n, dtype=int)
+        # Track min/max x and y for each root to calculate aperture instantly
+        self.min_x = coords[:, 0].copy()
+        self.max_x = coords[:, 0].copy()
+        self.min_y = coords[:, 1].copy()
+        self.max_y = coords[:, 1].copy()
+
+    def find(self, i):
+        if self.parent[i] == i:
+            return i
+        self.parent[i] = self.find(self.parent[i]) # Path compression
+        return self.parent[i]
+
+    def union(self, i, j):
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            # attach the smaller tree to the larger tree
+            if self.size[root_i] < self.size[root_j]:
+                root_i, root_j = root_j, root_i
+            self.parent[root_j] = root_i
+            self.size[root_i] += self.size[root_j]
+            self.num_components -= 1
+
+            # Update bounding box of the new root
+            self.min_x[root_i] = min(self.min_x[root_i], self.min_x[root_j])
+            self.max_x[root_i] = max(self.max_x[root_i], self.max_x[root_j])
+            self.min_y[root_i] = min(self.min_y[root_i], self.min_y[root_j])
+            self.max_y[root_i] = max(self.max_y[root_i], self.max_y[root_j])
+            return True
+        return False
+    
+    def get_component_sizes(self):
+        is_root = self.parent == np.arange(len(self.parent))
+        return self.size[is_root]
+
+    def get_aperture(self, root_idx):
+        # City-block aperture calculation: (max_x - min_x) + (max_y - min_y)
+        return (self.max_x[root_idx] - self.min_x[root_idx]) + \
+               (self.max_y[root_idx] - self.min_y[root_idx])
+    
+    def get_cluster_indices(self, reference_idx=0):
+        main_leader = self.find(reference_idx)
+        mask = np.array([self.find(i) == main_leader for i in range(num_elements)])
+        return mask
+
 #region Beamforming Model
 class BeamformingModel:
     def __init__(self, array: BeamformingArray, c: float = 343):
@@ -323,7 +374,7 @@ class BeamformingModel:
         unique_distances = np.sort(np.unique(dist_matrix))
 
         # each element has one or more active bands
-        unique_distances[unique_distances < 0.01] = 0.01 - 1e-6
+        unique_distances = unique_distances[unique_distances >= 0.01]
         self.f_cutoff = self.c / (2 * unique_distances) # sorted from highest to lowest
         self.active_elements = np.full((n, len(self.f_cutoff)-1), False)
 
