@@ -445,7 +445,7 @@ if __name__ == "__main__":
             print(f"Accepted Energies: {len(accepted_energies)}, Proposed States: {self.proposed_states}, Acceptance Ratio: {len(accepted_energies)/self.proposed_states:.3f}")
             print("\n")
 
-    print("Average optimized energy: ", np.mean(results[:, :, 0], axis = 1))
+    print("Average optimized energy: ", np.mean(results[:,:,0], axis = 1))
     print("Average acceptance ratio: ", np.mean(results[:,:,1], axis = 1))
 
     # fig, ax = plt.subplots()

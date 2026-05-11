@@ -12,9 +12,11 @@ from BeamformingModel import BeamformingModel, BeamformingPlot
 from BeamformingArray import BeamformingArray, ElementDirectivity
 
 class ParetoWeightGUI(QMainWindow):
-    def __init__(self, pareto_front_values, pareto_front_states, labels):
+    def __init__(self, pareto_front_values, pareto_front_states, labels, freq_lims):
         super().__init__()
         self.setWindowTitle("Pareto Front Weight Assignment")
+
+        self.freq_lims = freq_lims
         
         # Data Setup
         self.pareto_front_values = pareto_front_values
@@ -42,6 +44,9 @@ class ParetoWeightGUI(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
+        # initiate best index
+        self.current_best = 0
+
         # Left Side: Controls
         left_layout = QVBoxLayout()
         self.sliders = []
@@ -62,7 +67,7 @@ class ParetoWeightGUI(QMainWindow):
         left_layout.addStretch()
         
         # Result Display: Show a histogram of the values as you change the weights
-        self.histogram_canvas = FigureCanvas(Figure(figsize=(3,5)))
+        self.histogram_canvas = FigureCanvas(Figure(figsize=(1,5)))
         self.ax_hist = self.histogram_canvas.figure.add_subplot(111)
         left_layout.addWidget(self.histogram_canvas, 1)
 
@@ -71,6 +76,10 @@ class ParetoWeightGUI(QMainWindow):
         self.array_canvas = FigureCanvas(Figure(figsize=(8, 6)))
         self.ax_array = self.array_canvas.figure.add_subplot(111)
         self.ax_array.set_aspect('equal')
+        self.ax_array.set_xlabel("Y [m]")
+        self.ax_array.set_ylabel("Z [m]")
+        self.ax_array.grid(True, linestyle='--', alpha=0.5)
+        self.current_band = -1
         right_layout.addWidget(self.array_canvas)
 
         # frequency slider for different subarrays
@@ -83,8 +92,10 @@ class ParetoWeightGUI(QMainWindow):
         right_layout.addWidget(self.freq_label)
         right_layout.addWidget(self.freq_slider)
 
-        self.band_canvas = FigureCanvas(Figure(figsize=(4, 3)))
+        self.band_canvas = FigureCanvas(Figure(figsize=(4, 3), layout='constrained'))
         self.ax_bands = self.band_canvas.figure.add_subplot(111)
+        self.ax_bands.set_xscale('log')
+        plt.tight_layout()
         right_layout.addWidget(self.band_canvas)
         
         main_layout.addLayout(left_layout, 1)
@@ -107,23 +118,51 @@ class ParetoWeightGUI(QMainWindow):
     
     def on_freq_slider_change(self):
         
-        self.f_select = self.f_lo + self.freq_slider.value()/100 * (self.f_hi - self.f_lo)
+        self.f_select = (self.f_hi - self.f_lo)**(self.freq_slider.value()/100) + self.f_lo
         self.freq_label.setText(f"Frequency Selector for Subarrays: {self.f_select:.2f} Hz")
-        self.update_analysis()
+        self.frequency_update()
+
+    def frequency_update(self):
+
+        self.ax_array.clear()
+        band_id = np.where((self.f_select <= self.bf_model.f_cutoff[:-1]) & (self.f_select >= self.bf_model.f_cutoff[1:]))[0][0]
+        if band_id != self.current_band:
+            element_mask = self.bf_model.active_elements[:, band_id].flatten()
+            subarray_points = np.stack((self.bf_model.array.Y[element_mask], self.bf_model.array.Z[element_mask]), axis = -1)
+
+            if len(subarray_points) >= 3:
+                try: 
+                    tri = scipy.spatial.Delaunay(subarray_points)
+                    self.ax_array.triplot(subarray_points[:,0], subarray_points[:,1], tri.simplices, color = 'r', alpha = 0.5)
+                    self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'r')
+                    self.ax_array.scatter(self.bf_model.array.Y, self.bf_model.array.Z, marker = '.', color = 'k')
+                    self.ax_array.set_aspect('equal')
+                    self.ax_array.set_xlabel("Y [m]")
+                    self.ax_array.set_ylabel("Z [m]")
+                    self.ax_array.set_xlim([np.min(self.bf_model.array.Y) - 1, np.max(self.bf_model.array.Y) + 1])
+                    self.ax_array.set_ylim([np.min(self.bf_model.array.Z) - 1, np.max(self.bf_model.array.Z) + 1])
+                    self.ax_array.grid(True, linestyle='--', alpha=0.5)
+                    self.array_canvas.draw()
+                except:
+                    print("Can't make triangles for linear array")
+        self.current_band = band_id
 
     def update_analysis(self):
 
         # identify minimum value with weights
         weighted_sums = np.dot(self.norm_front, self.weights)
         best_idx = np.argmin(weighted_sums)
-        best_point_raw = self.pareto_front_values[best_idx]
         best_state = self.pareto_front_states[best_idx]
 
         # update histogram of pareto front values
         self.ax_hist.clear()
-        self.ax_hist.hist(weighted_sums, bins=15)
+        cmap = plt.get_cmap('viridis')
+        self.ax_hist.scatter(weighted_sums, np.zeros_like(weighted_sums), s=50, c=cmap(np.linspace(0, 1, len(weighted_sums))))
         self.ax_hist.set_title("Unified Value Distribution")
         self.ax_hist.set_xlim([0, 1])
+        self.ax_hist.set_ylim([-0.5, 0.5])
+        self.ax_hist.set_yticks([])
+        self.ax_hist.set_yticklabels([])
         self.histogram_canvas.draw()
 
         # update visualization of array
@@ -147,11 +186,11 @@ class ParetoWeightGUI(QMainWindow):
         Z = coords[:, 1]
         X = np.zeros_like(Y)
 
-        bf_array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPOLE)
-        bf_model = BeamformingModel(bf_array, c = 1460)
-        self.f_lo = np.min(bf_model.f_cutoff)
-        self.f_hi = np.max(bf_model.f_cutoff)
-        bands = bf_model.active_elements
+        self.bf_array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPOLE)
+        self.bf_model = BeamformingModel(self.bf_array, c = 1460)
+        self.f_lo = np.min(self.bf_model.f_cutoff)
+        self.f_hi = np.max(self.bf_model.f_cutoff)
+        bands = self.bf_model.active_elements
         unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
         subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
         valid_inds = np.where(subarray_mask)[0]
@@ -160,28 +199,34 @@ class ParetoWeightGUI(QMainWindow):
                 mask = unique_subarrays[:, i].astype(bool)
                 subarray_points = coords[mask]
 
-                f_hi = bf_model.f_cutoff[first_occurrence[i]]   
-                f_lo = bf_model.f_cutoff[np.where(mapping == i)[0][-1]]
+                f_hi = self.bf_model.f_cutoff[first_occurrence[i]]   
+                f_lo = self.bf_model.f_cutoff[np.where(mapping == i)[0][-1]]
                 num_elements = np.sum(mask)
                 if f_hi - f_lo > 0:
-                    self.ax_bands.barh(y=num_elements, width=(f_hi - f_lo), left=f_lo, height = 0.8, alpha=0.6, color=color)
+                    self.ax_bands.barh(y=num_elements, width=(f_hi - f_lo), left=f_lo, height = 0.8, alpha=0.5, color='r')
                 else:
-                    self.ax_bands.scatter(f_lo, num_elements, s = 20, marker = 'o', color = color)
+                    self.ax_bands.scatter(f_lo, num_elements, s = 20, marker = 'o', color = 'r', alpha = 0.6)
 
         self.f_select = self.f_select if self.f_select != 0 else (self.f_hi - self.f_lo)/2 + self.f_lo
-        band_id = np.where((self.f_select <= bf_model.f_cutoff[:-1]) & (self.f_select >= bf_model.f_cutoff[1:]))[0][0]
-        element_mask = bf_model.active_elements[:, band_id].flatten()
+        band_id = np.where((self.f_select <= self.bf_model.f_cutoff[:-1]) & (self.f_select >= self.bf_model.f_cutoff[1:]))[0][0]
+        element_mask = self.bf_model.active_elements[:, band_id].flatten()
         subarray_points = coords[element_mask]
 
         if len(subarray_points) >= 3:
             tri = scipy.spatial.Delaunay(subarray_points)
-            self.ax_array.triplot(subarray_points[:,0], subarray_points[:,1], tri.simplices, color = color, alpha = 0.5)
-            self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'k')
+            self.ax_array.triplot(subarray_points[:,0], subarray_points[:,1], tri.simplices, color = 'r', alpha = 0.5)
+            self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'r')
+            self.ax_array.set_aspect('equal')
+            self.ax_array.set_xlabel("Y [m]")
+            self.ax_array.set_ylabel("Z [m]")
+            self.ax_array.grid(True, linestyle='--', alpha=0.5)
+            self.ax_array.set_title(f"Pareto Index: {best_idx}")
 
-        self.ax_bands.set_xlabel("Frequency (Hz)")
+        self.ax_bands.set_xlabel("Frequency Coverage (Hz)")
         self.ax_bands.set_ylabel("Elements in Subarray")
-        self.ax_bands.set_title("Subarray Frequency Coverage")
         self.ax_bands.grid(True, linestyle='--', alpha=0.5)
+        self.ax_bands.set_xlim(self.freq_lims)
+        self.ax_bands.set_xscale('log')
         self.band_canvas.draw()
 
         self.array_canvas.draw()
@@ -189,17 +234,17 @@ class ParetoWeightGUI(QMainWindow):
 # Example usage with dummy data
 if __name__ == "__main__":
     # initialize model
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260506-215528.npz'))
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260510-155204.npz'))
     accepted_states = opt_data['arr_1']
     accepted_energies = opt_data['arr_2']
     min_energy = opt_data['arr_3']
     pareto_states = opt_data['arr_4']
     pareto_values = np.array(opt_data['arr_5'])
 
-    labels = ['total_size', 'count', 'aperture_min', 'f_dist']
+    labels = ['Minimize Subarrays Outside Range', 'Maximize Count per Subarray', 'Maximize Array Size', 'Minimize Subarray Variability']
     
     app = QApplication(sys.argv)
-    gui = ParetoWeightGUI(pareto_front_values=pareto_values, pareto_front_states=pareto_states, labels = labels)
+    gui = ParetoWeightGUI(pareto_front_values=pareto_values, pareto_front_states=pareto_states, labels = labels, freq_lims = [10, 100])
     gui.show()
     sys.exit(app.exec())
 

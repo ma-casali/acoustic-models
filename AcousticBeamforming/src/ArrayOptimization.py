@@ -83,6 +83,10 @@ def objective_function_fast(state, optimal_state = False):
     d_hist, _ = np.histogram(unique_distances, bins=bins)
     penalty_f_density = 2 / (1 + np.exp(-np.std(d_hist)/np.mean(d_hist))) - 1
 
+    # minimize distances outside of desired range
+    num_outside = np.sum((unique_distances < c / (2 * f_hi)) | (unique_distances > c / (2 * f_lo)))
+    penalty_outside_range = num_outside / (num_outside + num_elements/2)
+
     # determine subarrays for each band
     active_elements = np.full((n, len(f_cutoff)-1), False)
     for band_id in range(len(f_cutoff) - 1): 
@@ -104,9 +108,7 @@ def objective_function_fast(state, optimal_state = False):
 
         active_elements[:, band_id] = largest_subarray_mask
 
-    bands = active_elements.T 
-    unique_configs, _, mapping = np.unique(bands, axis=0, return_index=True, return_inverse=True)
-    unique_subarrays = unique_configs.T
+    unique_subarrays, _, mapping = np.unique(active_elements, axis=1, return_index=True, return_inverse=True)
 
     height_data = np.zeros(unique_subarrays.shape[1])
     width_data = np.zeros(unique_subarrays.shape[1])
@@ -129,17 +131,18 @@ def objective_function_fast(state, optimal_state = False):
         width_data[i] = aperture_width / spacing
 
     if np.all(height_data == 0):
-        penalty_aperture_min = 1
+        penalty_aperture_size = 1
     else:
-        penalty_aperture_min = np.exp(-(np.min(height_data) + np.min(width_data))) # [1, 0]
+        size_value = np.min(height_data) + np.min(width_data)
+        penalty_aperture_size = 1.0 / (size_value + 1.0)
 
     if len(count_array) > 2:
         med_ind = np.argmin(np.abs(np.diff(count_array - np.mean(count_array)))) # round down
-        penalty_count = 1 - count_array[med_ind] / np.max(count_array) # * f_array[med_ind] / max(np.max(f_array), 1e-9)
+        penalty_count = 1 - count_array[med_ind] / np.max(count_array) 
     else:
         penalty_count = 1
 
-    return np.array([penalty_total_size, penalty_count, penalty_aperture_min, penalty_f_density])
+    return np.array([penalty_outside_range, penalty_count, penalty_aperture_size, penalty_f_density])
 
 def objective_function_slow(state):
 
@@ -245,6 +248,23 @@ def objective_function_slow(state):
         unq_ind = np.unique(coords, axis = 0, return_index = True)[1]
         coords = coords[np.sort(unq_ind)]
 
+    X = np.zeros(coords.shape[0], dtype=np.float32)
+    Y = coords[:, 0].flatten()
+    Z = coords[:, 1].flatten()
+    array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPOLE)
+    bf_model = BeamformingModel(array, c = 1460)
+
+    bands = bf_model.active_elements
+    unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
+    subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
+    valid_inds = np.where(subarray_mask)[0]
+    f = []
+    for i in valid_inds: 
+        f_hi = bf_model.f_cutoff[first_occurrence[i]+1]
+        f_lo = bf_model.f_cutoff[np.where(mapping == i)[0][-1] + 1]
+        if f_hi != f_lo:
+            f.append((f_hi - f_lo)/2 + f_lo)
+
     if len(coords) < 2:
         di_f = np.ones(len(f)) * 1.761 # di of a single dipole element
         # hpbw = np.ones((len(f), 3)) * np.radians(30) # HPBW of a single dipole element
@@ -252,24 +272,6 @@ def objective_function_slow(state):
         msll_f = -np.ones(len(f))  # include the main lobe in the side lobe
         msll_de = -np.ones(len(steer_de))
     else:
-        X = np.zeros(coords.shape[0], dtype=np.float32)
-        Y = coords[:, 0].flatten()
-        Z = coords[:, 1].flatten()
-
-        array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPOLE)
-        bf_model = BeamformingModel(array, c = 1460)
-
-        bands = bf_model.active_elements
-        unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
-        subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
-        valid_inds = np.where(subarray_mask)[0]
-        f = []
-        for i in valid_inds: 
-            f_hi = bf_model.f_cutoff[first_occurrence[i]+1]
-            f_lo = bf_model.f_cutoff[np.where(mapping == i)[0][-1] + 1]
-            if f_hi != f_lo:
-                f.append((f_hi - f_lo)/2 + f_lo)
-        
         di_f = np.zeros(len(f))
         msll_f = np.zeros(len(f))
         for i in range(len(f)):
@@ -314,7 +316,7 @@ if __name__ == "__main__":
 
     np.seterr(all='raise')
     np.random.seed(13)
-    num_elements = 31
+    num_elements = 19
 
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
     save_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_'+now)
@@ -358,6 +360,5 @@ if __name__ == "__main__":
 
     np.savez(save_file, coords, opt.accepted_states, opt.accepted_energies, opt.global_min_energy, opt.pareto_optimal_states, opt.pareto_optimal_values)
 
-    opt.plot_results()
     plt.show()
 
