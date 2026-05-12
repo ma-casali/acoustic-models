@@ -6,6 +6,7 @@ import scipy
 from pymoo.indicators.hv import HV
 import concurrent.futures
 from collections import deque
+import concurrent
 
 class SAOptimization:
 
@@ -84,8 +85,7 @@ class SAOptimization:
         self.pareto_optimal_states = None
         self.pareto_optimal_values = None
         self.hypervolume = 0.0
-        self.hypervolume_history = deque(maxlen=5*self.ndim)
-        self.improvement_history = []
+        self.hypervolume_calculation_length = 5 * self.ndim
         self.improvement_eps = 1e-6
 
         # energy variables
@@ -224,22 +224,27 @@ class SAOptimization:
         with distortion applied to the energy values to smooth the landscape and make it easier to optimize.
         """
 
-        x_prime = np.tile(x, (len(x), 1))
-        diag = x + dx
-        diag[diag > lims[1, :]] = x[diag > lims[1, :]] - dx[diag > lims[1, :]]
-        np.fill_diagonal(x_prime, diag)  
-        y_prime = np.zeros((len(x), len(self.energy_vector)), dtype = np.float64)
-        for i1 in range(np.shape(x_prime)[0]):
-            y_prime[i1, :], _ = fun(x_prime[i1])
+        pos_value = self.state + dx
+        pos_value[pos_value > lims[1,:]] = 0
+        pos_value[pos_value <= lims[1,:]] = dx[pos_value <= lims[1,:]]
+        neg_value = self.state - dx
+        neg_value[neg_value < lims[0,:]] = 0
+        neg_value[neg_value >= lims[0,:]] = -dx[neg_value >= lims[0,:]]
 
-        norm_diff = (y_prime - y)/np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
-        norm_diff = np.sum(norm_diff, axis = 1)
+        plus_states = np.eye(self.ndim) * pos_value + x
+        minus_states = np.eye(self.ndim) * neg_value + x
+        
+        all_states = list(plus_states) + list(minus_states)
 
-        if np.all(norm_diff == 0) or np.any(np.isnan(norm_diff)):
-            print(norm_diff)
-            raise ValueError("Problem with sensitivity")
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = list(executor.map(self.function, all_states)) # use self.function here to only return array of objective values
 
-        return norm_diff/(np.diagonal(x_prime) - x) * np.ceil(np.diff(lims, axis = 0).flatten())
+        f_plus = np.array(results[:self.ndim])
+        f_minus = np.array(results[self.ndim:])
+
+        sensitivity = np.linalg.norm(np.abs(f_plus - f_minus), axis = 1) / (pos_value - neg_value)
+       
+        return sensitivity + 1e-9
 
     def log_distortion(self, x, beta = 0.5):
         """
@@ -298,28 +303,18 @@ class SAOptimization:
                 while not continue_flag and iter < self.reanneal_limit:
                     iter += 1
                     
-                    inc = self.state_inc
-                    lims = self.state_lims
-                    for i1 in range(np.shape(self.state)[0]):
-                        if self.momentum[i1] >= 100:
-                            alpha = 1 * self.momentum_scaling
-                        elif self.momentum[i1] <= -100:
-                            alpha = -1 * self.momentum_scaling
-                        else:
-                            alpha = (2/(1 + np.exp(-self.momentum[i1])) - 1) * self.momentum_scaling
+                    alphas = (2/(1 + np.exp(-self.momentum)) - 1) * self.momentum_scaling
+                    alphas[self.momentum >= 100] = self.momentum_scaling
+                    alphas[self.momentum <= -100] = -self.momentum_scaling
 
-                        sigma = search_dimensions[0, i1]
-                        
-                        z = np.random.standard_cauchy()
-                        w = np.random.standard_cauchy()
-                        sample = alpha * abs(z) + w
+                    z = np.random.standard_cauchy(size=self.ndim)
+                    w = np.random.standard_cauchy(size=self.ndim)
+                    samples = alphas * abs(z) + w
 
-                        state_candidate[i1] = self.state[i1] + (sample * sigma)
-                        if self.circular_inds[i1]:
-                            state_candidate[i1] = state_candidate[i1] % (2 * np.pi)
-                        else:
-                            state_candidate[i1] = np.clip(state_candidate[i1], lims[0, i1], lims[1, i1])
-                        state_candidate[i1] = np.round(state_candidate[i1]/inc[i1])*inc[i1] # round to nearest increment
+                    state_candidate = self.state + (samples * search_dimensions[0])
+                    state_candidate[self.circular_inds] = state_candidate[self.circular_inds] % (2 * np.pi)
+                    state_candidate[~self.circular_inds] = np.clip(state_candidate[~self.circular_inds], self.state_lims[0,~self.circular_inds], self.state_lims[1,~self.circular_inds])
+                    state_candidate = np.round(state_candidate/self.state_inc) * self.state_inc
 
                     if not self.constraint_func(state_candidate):
                         continue_flag = False
@@ -338,7 +333,7 @@ class SAOptimization:
                         uphill_losses = normalized_deltas[normalized_deltas < 0]
                         
                         if len(uphill_losses) > 0:
-                            delta_dom = np.mean(np.abs(uphill_losses))
+                            delta_dom = np.linalg.norm(np.abs(uphill_losses))
                             
                             if np.all(np.exp(-delta_dom / self.temperature) > np.random.uniform(0, 1)):
                                 continue_flag = True
@@ -403,11 +398,15 @@ class SAOptimization:
                     self.temperature_base = self.temperature_base_ref + (1 - self.temperature_base_ref)*self.volatility_ratio
 
                 # MARK: - Hypervolume
-                self.hypervolume = self.calculate_hypervolume()
-                self.hypervolume_history.append(self.hypervolume)
-                if len(self.hypervolume_history) >= self.hypervolume_history.maxlen:
-                    improvement = np.maximum(self.improvement_eps*0.1, self.hypervolume_history[-1] - self.hypervolume_history[0])
+                if iterations >= self.hypervolume_calculation_length:
+                    new_hypervolume = self.calculate_hypervolume()
+                    improvement = np.maximum(self.improvement_eps*0.1, new_hypervolume - self.hypervolume)
+                    self.hypervolume = new_hypervolume
+                    iterations = 0
+                else:
+                    iterations += 1
 
+                if self.hypervolume != 0:
                     update_value_new = int(10**(2*(np.log10(improvement)/np.log10(self.improvement_eps) - 1))*100)
                     pbar.update(update_value_new - update_value_old)
                     update_value_old = update_value_new
@@ -420,12 +419,10 @@ class SAOptimization:
                         "Pareto States": "{:d}".format(self.pareto_optimal_states.shape[0])
                     })
                 else:
-                    update_value_new = int(len(self.hypervolume_history)/self.hypervolume_history.maxlen*100)
+                    update_value_new = int(iterations/self.hypervolume_calculation_length*100)
                     pbar.update(update_value_new - update_value_old)
                     update_value_old = update_value_new
-
-                # calculate sensitivity using the directional gradient of energy
-                self.sensitivity = self.get_sensitivity(self.call_function, self.state, self.energy_vector, self.state_inc, self.state_lims)
+                    
 
         tqdm.tqdm.write("Optimization Complete. Global Min: " + np.array2string(self.global_min_energy, formatter={'float_kind':lambda x: "%.2e" % x}))
 

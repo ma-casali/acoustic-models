@@ -79,6 +79,8 @@ class ParetoWeightGUI(QMainWindow):
         self.ax_array.set_xlabel("Y [m]")
         self.ax_array.set_ylabel("Z [m]")
         self.ax_array.grid(True, linestyle='--', alpha=0.5)
+        self.best_idx = 0
+        self.ax_array.set_title(f"Pareto Index: {self.best_idx}")
         self.current_band = -1
         right_layout.addWidget(self.array_canvas)
 
@@ -142,6 +144,7 @@ class ParetoWeightGUI(QMainWindow):
                     self.ax_array.set_xlim([np.min(self.bf_model.array.Y) - 1, np.max(self.bf_model.array.Y) + 1])
                     self.ax_array.set_ylim([np.min(self.bf_model.array.Z) - 1, np.max(self.bf_model.array.Z) + 1])
                     self.ax_array.grid(True, linestyle='--', alpha=0.5)
+                    self.ax_array.set_title(f"Pareto Index: {self.best_idx}")
                     self.array_canvas.draw()
                 except:
                     print("Can't make triangles for linear array")
@@ -151,8 +154,8 @@ class ParetoWeightGUI(QMainWindow):
 
         # identify minimum value with weights
         weighted_sums = np.dot(self.norm_front, self.weights)
-        best_idx = np.argmin(weighted_sums)
-        best_state = self.pareto_front_states[best_idx]
+        self.best_idx = np.argmin(weighted_sums)
+        best_state = self.pareto_front_states[self.best_idx]
 
         # update histogram of pareto front values
         self.ax_hist.clear()
@@ -167,16 +170,21 @@ class ParetoWeightGUI(QMainWindow):
 
         # update visualization of array
         self.ax_array.clear()
-        self.ax_bands.clear()
 
         num_elements = len(best_state) // 2 + 2
-        coords = np.zeros((num_elements, 2), dtype=np.float32)
-        coords[1, :] = [0, best_state[0]] # place the second element on the y-axis to break symmetry and reduce the search space
-        curr_angle = 0
-        for i in range(2, num_elements):
-            curr_angle += best_state[(num_elements - 1)+ (i - 2)]
-            coords[i, 0] = coords[i-1, 0] + best_state[i-1] * np.cos(curr_angle)
-            coords[i, 1] = coords[i-1, 1] + best_state[i-1] * np.sin(curr_angle)
+        n = num_elements
+        freqs = best_state[:(n-1)]
+        angles = best_state[(n-1):]
+        cum_angles = np.cumsum(angles)
+        dx = np.zeros(n-1, dtype=np.float32)
+        dy = np.zeros(n-1, dtype=np.float32)
+        dy[0] = (1460 / freqs[0]) / 2
+        dx[1:] = (1460 / freqs[1:]) / 2 * np.cos(cum_angles)
+        dy[1:] = (1460 / freqs[1:]) / 2 * np.sin(cum_angles)
+        coords = np.zeros((n,2), dtype = np.float32)
+        coords[1:,0] = np.cumsum(dx)
+        coords[1:,1] = np.cumsum(dy)
+        coords = np.round(coords, decimals=2)
 
         self.ax_array.scatter(coords[:,0], coords[:,1], s = 15, c = 'k', marker = 'o')
         self.ax_array.set_xlim([np.min(coords[:, 0]) - 1, np.max(coords[:, 0]) + 1])
@@ -194,8 +202,8 @@ class ParetoWeightGUI(QMainWindow):
         unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
         subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
         valid_inds = np.where(subarray_mask)[0]
+        self.ax_bands.clear()
         for i in valid_inds: 
-                color = self.cmap(i % 10)
                 mask = unique_subarrays[:, i].astype(bool)
                 subarray_points = coords[mask]
 
@@ -213,28 +221,36 @@ class ParetoWeightGUI(QMainWindow):
         subarray_points = coords[element_mask]
 
         if len(subarray_points) >= 3:
-            tri = scipy.spatial.Delaunay(subarray_points)
-            self.ax_array.triplot(subarray_points[:,0], subarray_points[:,1], tri.simplices, color = 'r', alpha = 0.5)
-            self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'r')
-            self.ax_array.set_aspect('equal')
-            self.ax_array.set_xlabel("Y [m]")
-            self.ax_array.set_ylabel("Z [m]")
-            self.ax_array.grid(True, linestyle='--', alpha=0.5)
-            self.ax_array.set_title(f"Pareto Index: {best_idx}")
+            try:
+                tri = scipy.spatial.Delaunay(subarray_points)
+                self.ax_array.triplot(subarray_points[:,0], subarray_points[:,1], tri.simplices, color = 'r', alpha = 0.5)
+                self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'r')
+                self.ax_array.set_aspect('equal')
+                self.ax_array.set_xlabel("Y [m]")
+                self.ax_array.set_ylabel("Z [m]")
+                self.ax_array.grid(True, linestyle='--', alpha=0.5)
+                self.ax_array.set_title(f"Pareto Index: {self.best_idx}")
+            except:
+                self.ax_array.scatter(subarray_points[:,0], subarray_points[:,1], marker = 'o', color = 'r')
+                self.ax_array.set_aspect('equal')
+                self.ax_array.set_xlabel("Y [m]")
+                self.ax_array.set_ylabel("Z [m]")
+                self.ax_array.grid(True, linestyle='--', alpha=0.5)
+                self.ax_array.set_title(f"Pareto Index: {self.best_idx}")
 
         self.ax_bands.set_xlabel("Frequency Coverage (Hz)")
         self.ax_bands.set_ylabel("Elements in Subarray")
         self.ax_bands.grid(True, linestyle='--', alpha=0.5)
         self.ax_bands.set_xlim(self.freq_lims)
         self.ax_bands.set_xscale('log')
-        self.band_canvas.draw()
 
+        self.band_canvas.draw()
         self.array_canvas.draw()
 
 # Example usage with dummy data
 if __name__ == "__main__":
     # initialize model
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260510-155204.npz'))
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260511-143126.npz'))
     accepted_states = opt_data['arr_1']
     accepted_energies = opt_data['arr_2']
     min_energy = opt_data['arr_3']
