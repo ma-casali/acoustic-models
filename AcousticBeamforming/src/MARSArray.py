@@ -43,60 +43,106 @@ bf_array = BeamformingArray(X, Y, Z, element_directivity=ElementDirectivity.DIPO
 bf_model = BeamformingModel(bf_array, c = 1460)
 plotter = BeamformingPlot(bf_model)
 
-f = np.logspace(1, 2, 20)
-di = np.zeros(len(f))
-hpbw = np.zeros((len(f), 3))
-msll = np.zeros(len(f))
-
-bp_list = []
-for i, freq in enumerate(f):   
-    di[i], (hpbw[i,0], hpbw[i,1], hpbw[i,2]), msll[i] =  bf_model.get_beamforming_performance_measures(frequency=freq, c=1460)
-
-    az, de, bp = bf_model.compute_beampattern(frequency=freq, c=1460)
-    bp_list.append(bp[az == 0, :].flatten())
-bp_list = np.array(bp_list)
-msll[msll == 0] = np.nan
-
 fig, ax = plt.subplots()
-F, DE = np.meshgrid(f, np.degrees(de))
-cmap = mpl.cm.turbo
-bounds = np.arange(-21, 3, 3)
-norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='min')
-im = ax.pcolormesh(F, DE, 20*np.log10(np.abs(bp_list.T)/np.max(np.abs(bp_list.T))), cmap=cmap, norm=norm)
-ax.set_xlabel('Frequency (Hz)')
-ax.set_xscale('log')
-ax.set_ylabel('Elevation Angle (deg)')
-fig.colorbar(im, ax=ax, label='Normalized Gain (dB)')
-
-fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-ax[0].plot(f, di)
-ax[0].set_xlim([10, 100])
-ax[0].set_ylim(bottom=0)
-ax[0].set_xscale('log')
-ax[0].set_xlabel('Frequency (Hz))')
-ax[0].set_ylabel('Directivity Index (dB)')
-ax[0].set_title('Directivity Index vs Frequency')
-ax[0].grid(True, which='both', linestyle='--', alpha=0.5)
-
-ax[1].plot(f, np.degrees(hpbw[:, 0]), 'b-', label='Min HPBW')
-ax[1].plot(f, np.degrees(hpbw[:, 1]), 'k--', label='Mean HPBW')
-ax[1].plot(f, np.degrees(hpbw[:, 2]), 'r-', label='Max HPBW')
-ax[1].set_xlim([10, 100])
-ax[1].set_ylim([0, 90])
-ax[1].set_xscale('log')
-ax[1].set_xlabel('Frequency (Hz)')
-ax[1].set_ylabel('HPBW (degrees)')
-ax[1].set_title('HPBW vs Frequency')
-ax[1].legend()
-ax[1].grid(True, which='both', linestyle='--', alpha=0.5)
-
-ax[2].plot(f, msll)
-ax[2].set_xlim([10, 100])
-ax[2].set_ylim([-3, 0])
-ax[2].set_xscale('log')
-ax[2].set_xlabel('Frequency (Hz)')
-ax[2].set_ylabel('Max Side Lobe Level (dB)')
-ax[2].set_title('MSLL vs. Frequency')
-ax[2].grid(True, which='both',linestyle='--', alpha=0.5)
-
+ax.scatter(bf_array.Y, bf_array.Z, s = 25, marker = 'o', c = 'k')
+ax.set_xlabel('Y [m]')
+ax.set_ylabel('Z [m]')
+ax.set_aspect('equal')
+ax.grid(True, which='both', linestyle='--', alpha=0.5)
 plt.show()
+
+# bands = bf_model.active_elements
+# unique_subarrays, first_occurrence, mapping = np.unique(bands, axis=1, return_index=True, return_inverse=True)
+# subarray_mask = np.sum(unique_subarrays, axis = 0) > 2
+# valid_inds = np.where((subarray_mask))[0]
+# valid_inds = valid_inds[(bf_model.f_cutoff[first_occurrence] <= 100) & (bf_model.f_cutoff[np.unique(mapping)] >= 10)]
+# n_arrays = len(valid_inds)
+# rows = int(np.floor(np.sqrt(n_arrays)))
+# cols = int(np.ceil(n_arrays/rows))
+# fig, ax = plt.subplots(rows, cols)
+# for i, valid_ind in enumerate(valid_inds): 
+#     ax_i = i // cols
+#     ax_j = i % cols
+#     mask = unique_subarrays[:, valid_ind].astype(bool)
+#     subarray_points = coords[mask]
+
+#     f_hi = bf_model.f_cutoff[first_occurrence[valid_ind]]   
+#     f_lo = bf_model.f_cutoff[np.where(mapping == valid_ind)[0][-1]]
+#     num_elements = np.sum(mask)
+#     ax[ax_i, ax_j].scatter(bf_array.Y, bf_array.Z, s = 25, c = 'k', marker = '.')
+#     ax[ax_i, ax_j].scatter(subarray_points[:,0], subarray_points[:,1], s = 25, c = 'r', marker = 'o')
+#     ax[ax_i, ax_j].set_xlabel("Y [m]")
+#     ax[ax_i, ax_j].set_ylabel("Z [m]")
+#     # ax[ax_i, ax_j].set_aspect('equal')
+#     ax[ax_i, ax_j].grid(True, which='both', linestyle='--', alpha=0.5)
+#     if f_hi - f_lo > 0:
+#         ax[ax_i, ax_j].set_title(f"[{f_lo:.1f} -> {f_hi:.1f}] Hz")
+#     else:
+#         ax[ax_i, ax_j].set_title(f"{f_lo:.1f} Hz")
+
+# print(rows*cols - len(valid_inds))
+# for i in range(rows*cols - len(valid_inds)):
+#     ax_i = (len(valid_inds) + i) // cols
+#     ax_j = (len(valid_inds) + i) % cols
+#     ax[ax_i, ax_j].remove()
+
+# plt.tight_layout(h_pad = -0.5, w_pad = -0.5)
+# plt.show()
+
+# f = np.logspace(1, 2, 20)
+# di = np.zeros(len(f))
+# hpbw = np.zeros((len(f), 3))
+# msll = np.zeros(len(f))
+# bp_list = []
+# for i, freq in enumerate(f):   
+#     di[i], (hpbw[i,0], hpbw[i,1], hpbw[i,2]), msll[i] =  bf_model.get_beamforming_performance_measures(frequency=freq, c=1460)
+
+# #     az, de, bp = bf_model.compute_beampattern(frequency=freq, c=1460)
+# #     bp_list.append(bp[az == 0, :].flatten())
+# # bp_list = np.array(bp_list)
+# msll[msll == 0] = np.nan
+
+# fig, ax = plt.subplots()
+# F, DE = np.meshgrid(f, np.degrees(de))
+# cmap = mpl.cm.turbo
+# bounds = np.arange(-21, 3, 3)
+# norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='min')
+# im = ax.pcolormesh(F, DE, 20*np.log10(np.abs(bp_list.T)/np.max(np.abs(bp_list.T))), cmap=cmap, norm=norm)
+# ax.set_xlabel('Frequency (Hz)')
+# ax.set_xscale('log')
+# ax.set_ylabel('Elevation Angle (deg)')
+# fig.colorbar(im, ax=ax, label='Normalized Gain (dB)')
+
+# fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+# ax[0].plot(f, di)
+# ax[0].set_xlim([10, 100])
+# ax[0].set_ylim(bottom=0)
+# ax[0].set_xscale('log')
+# ax[0].set_xlabel('Frequency (Hz))')
+# ax[0].set_ylabel('Directivity Index (dB)')
+# ax[0].set_title('Directivity Index vs Frequency')
+# ax[0].grid(True, which='both', linestyle='--', alpha=0.5)
+
+# ax[1].plot(f, np.degrees(hpbw[:, 0]), 'b-', label='Min HPBW')
+# ax[1].plot(f, np.degrees(hpbw[:, 1]), 'k--', label='Mean HPBW')
+# ax[1].plot(f, np.degrees(hpbw[:, 2]), 'r-', label='Max HPBW')
+# ax[1].set_xlim([10, 100])
+# ax[1].set_ylim([0, 90])
+# ax[1].set_xscale('log')
+# ax[1].set_xlabel('Frequency (Hz)')
+# ax[1].set_ylabel('HPBW (degrees)')
+# ax[1].set_title('HPBW vs Frequency')
+# ax[1].legend()
+# ax[1].grid(True, which='both', linestyle='--', alpha=0.5)
+
+# ax[2].plot(f, msll)
+# ax[2].set_xlim([10, 100])
+# ax[2].set_ylim([-3, 0])
+# ax[2].set_xscale('log')
+# ax[2].set_xlabel('Frequency (Hz)')
+# ax[2].set_ylabel('Max Side Lobe Level (dB)')
+# ax[2].set_title('MSLL vs. Frequency')
+# ax[2].grid(True, which='both',linestyle='--', alpha=0.5)
+
+# plt.tight_layout()
+# plt.show()

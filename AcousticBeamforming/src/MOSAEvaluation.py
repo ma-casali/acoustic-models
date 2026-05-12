@@ -219,7 +219,7 @@ class ParetoWeightGUI(QMainWindow):
         band_id = np.where((self.f_select <= self.bf_model.f_cutoff[:-1]) & (self.f_select >= self.bf_model.f_cutoff[1:]))[0][0]
         element_mask = self.bf_model.active_elements[:, band_id].flatten()
         subarray_points = coords[element_mask]
-
+        
         if len(subarray_points) >= 3:
             try:
                 tri = scipy.spatial.Delaunay(subarray_points)
