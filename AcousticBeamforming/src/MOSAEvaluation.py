@@ -1,22 +1,27 @@
 import sys
 import os
 import numpy as np
+from collections import deque
 import scipy
 import matplotlib.pyplot as plt
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QSlider, QLabel, QTextEdit)
+                             QHBoxLayout, QSlider, QLabel, QTextEdit, QComboBox)
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from BeamformingModel import BeamformingModel, BeamformingPlot
 from BeamformingArray import BeamformingArray, ElementDirectivity
 
+sys.path.append(os.path.abspath('../acoustic-models'))
+from SimulatedAnnealing import GridPoints
+
 class ParetoWeightGUI(QMainWindow):
-    def __init__(self, pareto_front_values, pareto_front_states, labels, freq_lims):
+    def __init__(self, pareto_front_values, pareto_front_states, labels, freq_lims, grid_points):
         super().__init__()
         self.setWindowTitle("Pareto Front Weight Assignment")
 
         self.freq_lims = freq_lims
+        self.grid_points = grid_points
         
         # Data Setup
         self.pareto_front_values = pareto_front_values
@@ -49,8 +54,17 @@ class ParetoWeightGUI(QMainWindow):
 
         # Left Side: Controls
         left_layout = QVBoxLayout()
+
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems(["Weighted Sum", "Chevyshev", "Epsilon-Constraint"])
+        self.mode_selector.currentIndexChanged.connect(self.on_mode_change)
+        self.current_mode = 'linear'
+        left_layout.insertWidget(0, QLabel("Unified Value Method:"))
+        left_layout.insertWidget(1, self.mode_selector)
+
         self.sliders = []
         self.weight_labels = []
+        self.change_history = deque(maxlen=self.num_objectives-1)
 
         for i in range(self.num_objectives):
             label = QLabel(f"{labels[i]} weight: {self.weights[i]:.2f}")
@@ -103,15 +117,29 @@ class ParetoWeightGUI(QMainWindow):
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(right_layout, 1)
 
+    def on_mode_change(self, index):
+        modes = ['linear', 'chebyshev', 'epsilon']
+        self.current_mode = modes[index]
+        self.update_analysis()
+
     def on_slider_change(self):
         # Update weights from sliders
         self.f_select = 0.0
         self.freq_label.setText(f"Frequency Selector for Subarrays: {self.f_select:.2f} Hz")
-        raw_weights = np.array([s.value() for s in self.sliders])
+        raw_weights = np.array([((100-1)**(s.value()/50)-1)/(100 - 2) for s in self.sliders])
         total = np.sum(raw_weights)
+
+        ind_changed = np.where(self.weights - raw_weights != 0)[0]
+        if len(ind_changed) > 1:
+            ind_changed = 0
+        else:
+            ind_changed = int(ind_changed[0])
+            
+        if ind_changed not in self.change_history:
+            self.change_history.append(ind_changed)
         
         if total > 0:
-            self.weights = raw_weights / total  # Normalizing so sum(w) = 1.0 
+            self.weights = raw_weights # Normalizing so sum(w) = 1.0 
         
         for i, label in enumerate(self.weight_labels):
             label.setText(f"{labels[i]} weight: {self.weights[i]:.2f}")
@@ -152,15 +180,43 @@ class ParetoWeightGUI(QMainWindow):
 
     def update_analysis(self):
 
-        # identify minimum value with weights
-        weighted_sums = np.dot(self.norm_front, self.weights)
-        self.best_idx = np.argmin(weighted_sums)
+        mode = self.current_mode
+
+        if mode == 'linear':
+            # identify minimum value with weights
+            weighted_sums = np.dot(self.norm_front, self.weights)
+            self.best_idx = np.argmin(weighted_sums)
+            plot_value = weighted_sums
+        
+        elif mode == 'chebyshev':
+            weighted_max = np.max(self.weights * self.norm_front, axis = 1)
+            self.best_idx = np.argmin(weighted_max)
+            plot_value = weighted_max
+
+        elif mode == 'epsilon':
+            epsilon = np.array([s.value()/100 for s in self.sliders])
+            for i, label in enumerate(self.weight_labels):
+                label.setText(f"{labels[i]} epsilon limit: {epsilon[i]:.2f}")
+            if len(self.change_history) == self.change_history.maxlen:
+                ref_value = np.arange(self.num_objectives) == np.setdiff1d(np.arange(self.num_objectives), np.array(self.change_history))
+            else:
+                ref_value = np.array([1, 0, 0, 0], dtype=bool)
+            constraints = np.all(self.norm_front[:, ~ref_value] <= epsilon[~ref_value], axis = 1)
+
+            if np.any(constraints):
+                valid_indices = np.where(constraints)[0]
+                self.best_idx = valid_indices[np.argmin(self.norm_front[valid_indices, ref_value])]
+                plot_value = self.norm_front[valid_indices, ref_value]
+            else:
+                print("Error: no points satisfy the given condition")
+                plot_value = []
+
         best_state = self.pareto_front_states[self.best_idx]
 
         # update histogram of pareto front values
         self.ax_hist.clear()
         cmap = plt.get_cmap('viridis')
-        self.ax_hist.scatter(weighted_sums, np.zeros_like(weighted_sums), s=50, c=cmap(np.linspace(0, 1, len(weighted_sums))))
+        self.ax_hist.scatter(plot_value, np.zeros_like(plot_value), s=50, c=cmap(np.linspace(0, 1, len(plot_value))))
         self.ax_hist.set_title("Unified Value Distribution")
         self.ax_hist.set_xlim([0, 1])
         self.ax_hist.set_ylim([-0.5, 0.5])
@@ -171,20 +227,32 @@ class ParetoWeightGUI(QMainWindow):
         # update visualization of array
         self.ax_array.clear()
 
-        num_elements = len(best_state) // 2 + 2
-        n = num_elements
-        freqs = best_state[:(n-1)]
-        angles = best_state[(n-1):]
-        cum_angles = np.cumsum(angles)
-        dx = np.zeros(n-1, dtype=np.float32)
-        dy = np.zeros(n-1, dtype=np.float32)
-        dy[0] = (1460 / freqs[0]) / 2
-        dx[1:] = (1460 / freqs[1:]) / 2 * np.cos(cum_angles)
-        dy[1:] = (1460 / freqs[1:]) / 2 * np.sin(cum_angles)
-        coords = np.zeros((n,2), dtype = np.float32)
-        coords[1:,0] = np.cumsum(dx)
-        coords[1:,1] = np.cumsum(dy)
-        coords = np.round(coords, decimals=2)
+        # num_elements = len(best_state) // 2 + 2
+        # n = num_elements
+        # freqs = best_state[:(n-1)]
+        # angles = best_state[(n-1):]
+        # cum_angles = np.cumsum(angles)
+        # dx = np.zeros(n-1, dtype=np.float32)
+        # dy = np.zeros(n-1, dtype=np.float32)
+        # dy[0] = (1460 / freqs[0]) / 2
+        # dx[1:] = (1460 / freqs[1:]) / 2 * np.cos(cum_angles)
+        # dy[1:] = (1460 / freqs[1:]) / 2 * np.sin(cum_angles)
+        # coords = np.zeros((n,2), dtype = np.float32)
+        # coords[1:,0] = np.cumsum(dx)
+        # coords[1:,1] = np.cumsum(dy)
+        # coords = np.round(coords, decimals=2)
+        # coords[:,0] = (coords[:,0] // (1460 / self.freq_lims[1] / 2)) * (1460 / self.freq_lims[1] / 2) # discretize y so that points are in lines spaced 10 m apart.
+        # num_elements = len(best_state) // 2
+        # n = num_elements
+        # coords = np.vstack((best_state[:n], best_state[n:])).T
+        num_elements = len(best_state)
+        available_indices = list(range(len(self.grid_points.points)))
+        final_indices = np.zeros(num_elements, dtype = int)
+        for i, choice in enumerate(best_state):
+            idx = available_indices.pop(int(choice))
+            final_indices[i] = int(idx)
+
+        coords = self.grid_points.points[final_indices]  
 
         self.ax_array.scatter(coords[:,0], coords[:,1], s = 15, c = 'k', marker = 'o')
         self.ax_array.set_xlim([np.min(coords[:, 0]) - 1, np.max(coords[:, 0]) + 1])
@@ -249,18 +317,32 @@ class ParetoWeightGUI(QMainWindow):
 
 # Example usage with dummy data
 if __name__ == "__main__":
+    
     # initialize model
-    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260511-143126.npz'))
-    accepted_states = opt_data['arr_1']
-    accepted_energies = opt_data['arr_2']
-    min_energy = opt_data['arr_3']
-    pareto_states = opt_data['arr_4']
-    pareto_values = np.array(opt_data['arr_5'])
+    opt_data = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Data', 'ArrayOpt_20260515-091813.npz'))
+    accepted_states = opt_data['arr_0']
+    accepted_energies = opt_data['arr_1']
+    min_energy = opt_data['arr_2']
+    pareto_states = opt_data['arr_3']
+    pareto_values = np.array(opt_data['arr_4'])
 
-    labels = ['Minimize Subarrays Outside Range', 'Maximize Count per Subarray', 'Maximize Array Size', 'Minimize Subarray Variability']
+    labels = ['Min. Inter-Subarray Distance Variation', 'Max. Count per Subarray', 'Max. Array Aperture', 'Max. Subarray Roundness']
+
+    f_min = 10
+    f_max = 100
+    c = 1460
+    
+    P = 2 # aperture in half-wavelengths
+    d_min = c / f_max / 2
+    d_max = c / f_min / 2
+
+    x = np.arange(0, P * d_max, d_min)
+    X, Y = np.meshgrid(x, x)
+    points = np.vstack((X.flatten(), Y.flatten())).T
+    grid_points = GridPoints(points)
     
     app = QApplication(sys.argv)
-    gui = ParetoWeightGUI(pareto_front_values=pareto_values, pareto_front_states=pareto_states, labels = labels, freq_lims = [10, 100])
+    gui = ParetoWeightGUI(pareto_front_values=pareto_values, pareto_front_states=pareto_states, labels = labels, freq_lims = [f_min, f_max], grid_points = grid_points)
     gui.show()
     sys.exit(app.exec())
 

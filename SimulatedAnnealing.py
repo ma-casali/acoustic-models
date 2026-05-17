@@ -8,6 +8,10 @@ import concurrent.futures
 from collections import deque
 import concurrent
 
+class GridPoints():
+    def __init__(self, points):
+        self.points = points
+
 class SAOptimization:
 
     def __init__(
@@ -16,6 +20,7 @@ class SAOptimization:
             constraint_func: callable = None,
             ndim: int = None,
             state_0: np.ndarray = None,
+            grid_points: GridPoints = None,
             state_lims: np.ndarray = None,
             circular_inds: np.ndarray = None,
             state_inc: np.ndarray = None,
@@ -43,6 +48,7 @@ class SAOptimization:
         
         # function related variables
         self.function = func if func is not None else self.rosenbrock
+        self.grid_points = grid_points
         self.constraint_func = constraint_func if constraint_func is not None else self.default_constraint
 
         # state variables
@@ -85,7 +91,7 @@ class SAOptimization:
         self.pareto_optimal_states = None
         self.pareto_optimal_values = None
         self.hypervolume = 0.0
-        self.hypervolume_calculation_length = 5 * self.ndim
+        self.hypervolume_calculation_length = 3 * self.ndim
         self.improvement_eps = 1e-6
 
         # energy variables
@@ -105,8 +111,9 @@ class SAOptimization:
         current_state = self.state 
         scaling = self.search_scaling_func(self.state, self.state_inc)
         for _ in range(num_samples):
-            perturbation = np.random.standard_cauchy(size=self.ndim) * self.state_inc * scaling
+            perturbation = np.random.standard_cauchy(size=self.ndim) * scaling
             test_state = current_state + perturbation
+            test_state = np.round(test_state/self.state_inc) * self.state_inc
             test_state = np.clip(test_state, self.state_lims[0], self.state_lims[1])  
             test_energy, _ = self.call_function(test_state)
             delta_energy = (self.energy_vector - test_energy) # /np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
@@ -162,7 +169,7 @@ class SAOptimization:
     def rosenbrock(self, x):
         return np.sum(100*(x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2, axis = 0)
     
-    def default_search_scaling_func(self):
+    def default_search_scaling_func(self, state, inc):
         return np.ones_like(self.state)
     
     def default_constraint(self, x):
@@ -224,20 +231,21 @@ class SAOptimization:
         with distortion applied to the energy values to smooth the landscape and make it easier to optimize.
         """
 
-        pos_value = self.state + dx
-        pos_value[pos_value > lims[1,:]] = 0
-        pos_value[pos_value <= lims[1,:]] = dx[pos_value <= lims[1,:]]
-        neg_value = self.state - dx
-        neg_value[neg_value < lims[0,:]] = 0
-        neg_value[neg_value >= lims[0,:]] = -dx[neg_value >= lims[0,:]]
+        # Calculate perturbed states
+        pos_value = np.zeros(len(x))
+        pos_value[x + dx <= lims[1,:]] = dx[x + dx <= lims[1,:]]
+        
+        neg_value = np.zeros(len(x))
+        neg_value[x - dx >= lims[0,:]] = -dx[x - dx >= lims[0,:]]
 
         plus_states = np.eye(self.ndim) * pos_value + x
         minus_states = np.eye(self.ndim) * neg_value + x
         
         all_states = list(plus_states) + list(minus_states)
+        all_grid_points = [self.grid_points] * len(all_states)
 
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            results = list(executor.map(self.function, all_states)) # use self.function here to only return array of objective values
+            results = list(executor.map(self.function, all_states, all_grid_points)) # use self.function here to only return array of objective values
 
         f_plus = np.array(results[:self.ndim])
         f_minus = np.array(results[self.ndim:])
@@ -256,12 +264,8 @@ class SAOptimization:
         return x
     
     def call_function(self, x):
-        if self.energy_reference is None:
-            energy_array = self.function(x)
-            pareto_optimal = self.pareto_optimality(x, energy_array)
-        else:
-            energy_array = self.function(x, penalty_start = self.energy_reference)
-            pareto_optimal = self.pareto_optimality(x, energy_array)
+        energy_array = self.function(x, grid_points = self.grid_points)
+        pareto_optimal = self.pareto_optimality(x, energy_array)
 
         return energy_array, pareto_optimal
 
@@ -313,8 +317,8 @@ class SAOptimization:
 
                     state_candidate = self.state + (samples * search_dimensions[0])
                     state_candidate[self.circular_inds] = state_candidate[self.circular_inds] % (2 * np.pi)
-                    state_candidate[~self.circular_inds] = np.clip(state_candidate[~self.circular_inds], self.state_lims[0,~self.circular_inds], self.state_lims[1,~self.circular_inds])
                     state_candidate = np.round(state_candidate/self.state_inc) * self.state_inc
+                    state_candidate[~self.circular_inds] = np.clip(state_candidate[~self.circular_inds], self.state_lims[0,~self.circular_inds], self.state_lims[1,~self.circular_inds])
 
                     if not self.constraint_func(state_candidate):
                         continue_flag = False
@@ -328,17 +332,21 @@ class SAOptimization:
                         self.num_accepted += 1
                         self.num_accepted_total += 1
                     else:
-                        range_vec = np.maximum(1e-9, self.nadir_vector - self.ideal_vector)
+                        range_vec = np.maximum(1e-3, self.nadir_vector - self.ideal_vector)
+                        range_vec[self.nadir_vector - self.ideal_vector == 0] = 1
                         normalized_deltas = (self.energy_vector - new_energy_vector) / range_vec
                         uphill_losses = normalized_deltas[normalized_deltas < 0]
                         
                         if len(uphill_losses) > 0:
                             delta_dom = np.linalg.norm(np.abs(uphill_losses))
                             
-                            if np.all(np.exp(-delta_dom / self.temperature) > np.random.uniform(0, 1)):
-                                continue_flag = True
-                                self.num_accepted += 1
-                                self.num_accepted_total += 1
+                            try:
+                                if np.all(np.exp(-delta_dom / self.temperature) > np.random.uniform(0, 1)):
+                                    continue_flag = True
+                                    self.num_accepted += 1
+                                    self.num_accepted_total += 1
+                            except:
+                                raise ValueError(f"underflow error: range_vec = {range_vec}, temp = {self.temperature}")
 
                     self.proposed_states += 1
 
@@ -367,6 +375,7 @@ class SAOptimization:
                     new_qmc_point = self.sampler.random(n=1)
                     teleport_state = scipy.stats.qmc.scale(new_qmc_point, self.state_lims[0,:], self.state_lims[1,:]).flatten()
                     self.state = np.round(teleport_state / self.state_inc) * self.state_inc
+                    self.state = np.clip(self.state, self.state_lims[0,:], self.state_lims[1,:])
                     self.energy_vector, _ = self.call_function(self.state)
 
                 else:
